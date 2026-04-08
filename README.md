@@ -42,15 +42,18 @@ A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliabil
 
 ## One-Line Install & Run
 
-Paste this into an **Administrator PowerShell** window — it downloads, benchmarks, and applies the best DNS automatically:
+Paste this into **any PowerShell window** — it auto-elevates to admin, downloads, benchmarks, and applies the best DNS:
 
 ```powershell
-irm https://raw.githubusercontent.com/TiltedLunar123/DNS-Benchmark/master/DNS-Benchmark.ps1 -OutFile "$env:TEMP\DNS-Benchmark.ps1"; Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$env:TEMP\DNS-Benchmark.ps1`""
+irm https://raw.githubusercontent.com/TiltedLunar123/DNS-Benchmark/master/install.ps1 | iex
 ```
 
-That's it. It downloads the script to your temp folder, elevates to admin if needed, and runs the full benchmark.
-
-> **Want report mode?** Add `-Report` to the arguments. **Benchmark only?** Add `-SkipApply`.
+**What happens:**
+1. Requests admin privileges (UAC prompt)
+2. Downloads the latest script to `%USERPROFILE%\DNS-Benchmark\`
+3. Runs the full benchmark
+4. Window stays open so you can see the results and confirm changes
+5. Saves the script locally so you can re-run anytime
 
 ## Quick Start (Manual)
 
