@@ -40,6 +40,10 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 1
 }
 
+# -- Script directory (fallback for when run via ScriptBlock/iex where $ScriptDir is empty)
+$ScriptDir = if ($ScriptDir) { $ScriptDir } else { Join-Path $env:USERPROFILE "DNS-Benchmark" }
+if (-not (Test-Path $ScriptDir)) { New-Item -ItemType Directory -Path $ScriptDir -Force | Out-Null }
+
 # -- Color helpers --------------------------------------------------------------
 function Write-Header  { param($Text) Write-Host ("`n  +{0}+" -f ("-" * 62)) -ForegroundColor Cyan; Write-Host ("  |  $Text{0}|" -f (" " * (59 - $Text.Length))) -ForegroundColor Cyan; Write-Host ("  +{0}+" -f ("-" * 62)) -ForegroundColor Cyan }
 function Write-Status  { param($Text) Write-Host "  [*] $Text" -ForegroundColor Yellow }
@@ -300,7 +304,7 @@ Write-Info    "Features:         $($winner.Features)"
 
 # -- Export Report --------------------------------------------------------------
 if ($Report) {
-    $reportPath = Join-Path $PSScriptRoot "DNS-Benchmark-Report_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').csv"
+    $reportPath = Join-Path $ScriptDir "DNS-Benchmark-Report_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').csv"
     $results | Select-Object Name, Primary, Secondary, AvgLatency, MedianLatency, MinLatency, MaxLatency, Jitter, Reliability, SecurityScore, CompositeScore, Features |
         Export-Csv -Path $reportPath -NoTypeInformation
     Write-Host ""
@@ -327,7 +331,7 @@ if (-not $SkipApply) {
     if ($confirm -match "^[Yy]?$") {
         try {
             # Backup current settings
-            $backupPath = Join-Path $PSScriptRoot "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
+            $backupPath = Join-Path $ScriptDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
             @{
                 Adapter      = $adapter.Name
                 InterfaceIdx = $adapter.InterfaceIndex
