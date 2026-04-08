@@ -33,33 +33,32 @@ param(
     [switch]$Report
 )
 
-# ── Admin check ────────────────────────────────────────────────────────────────
+# -- Admin check --------------------------------------------------------------------------
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "  [-] This script must be run as Administrator." -ForegroundColor Red
     Write-Host "  [i] Right-click PowerShell > 'Run as Administrator', or use install.ps1" -ForegroundColor Gray
     exit 1
 }
 
-# ── Color helpers ──────────────────────────────────────────────────────────────
-function Write-Header  { param($Text) Write-Host "`n╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan; Write-Host "║  $Text" -ForegroundColor Cyan -NoNewline; Write-Host (" " * (61 - $Text.Length)) -NoNewline; Write-Host "║" -ForegroundColor Cyan; Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan }
+# -- Color helpers --------------------------------------------------------------
+function Write-Header  { param($Text) Write-Host ("`n  +{0}+" -f ("-" * 62)) -ForegroundColor Cyan; Write-Host ("  |  $Text{0}|" -f (" " * (59 - $Text.Length))) -ForegroundColor Cyan; Write-Host ("  +{0}+" -f ("-" * 62)) -ForegroundColor Cyan }
 function Write-Status  { param($Text) Write-Host "  [*] $Text" -ForegroundColor Yellow }
 function Write-Success { param($Text) Write-Host "  [+] $Text" -ForegroundColor Green }
 function Write-Err     { param($Text) Write-Host "  [-] $Text" -ForegroundColor Red }
 function Write-Info    { param($Text) Write-Host "  [i] $Text" -ForegroundColor Gray }
 
-# ── Banner ─────────────────────────────────────────────────────────────────────
+# -- Banner ---------------------------------------------------------------------
 Clear-Host
 Write-Host ""
-Write-Host "  ██████╗ ███╗   ██╗███████╗" -ForegroundColor Cyan
-Write-Host "  ██╔══██╗████╗  ██║██╔════╝" -ForegroundColor Cyan
-Write-Host "  ██║  ██║██╔██╗ ██║███████╗" -ForegroundColor Cyan
-Write-Host "  ██║  ██║██║╚██╗██║╚════██║" -ForegroundColor DarkCyan
-Write-Host "  ██████╔╝██║ ╚████║███████║" -ForegroundColor DarkCyan
-Write-Host "  ╚═════╝ ╚═╝  ╚═══╝╚══════╝" -ForegroundColor DarkCyan
-Write-Host "  Benchmark & Optimizer       " -ForegroundColor White
+Write-Host "   ____  _   _ ____  " -ForegroundColor Cyan
+Write-Host "  |  _ \| \ | / ___| " -ForegroundColor Cyan
+Write-Host "  | | | |  \| \___ \ " -ForegroundColor Cyan
+Write-Host "  | |_| | |\  |___) |" -ForegroundColor DarkCyan
+Write-Host "  |____/|_| \_|____/ " -ForegroundColor DarkCyan
+Write-Host "  Benchmark and Optimizer" -ForegroundColor White
 Write-Host ""
 
-# ── DNS Server Database ────────────────────────────────────────────────────────
+# -- DNS Server Database --------------------------------------------------------
 # Each entry: Name, Primary IPv4, Secondary IPv4, Security Score (0-100)
 # Security scoring based on: DNSSEC validation, no-logging policy, malware blocking,
 # DNS-over-HTTPS support, DNS-over-TLS support, open-source/audited
@@ -97,7 +96,7 @@ $TestDomains = @(
     "reddit.com"
 )
 
-# ── Restore mode ───────────────────────────────────────────────────────────────
+# -- Restore mode ---------------------------------------------------------------
 if ($Restore) {
     Write-Header "Restoring DNS to Automatic (DHCP)"
 
@@ -114,7 +113,7 @@ if ($Restore) {
     exit 0
 }
 
-# ── Detect active adapter ─────────────────────────────────────────────────────
+# -- Detect active adapter -----------------------------------------------------
 Write-Header "System Detection"
 
 $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth" } | Select-Object -First 1
@@ -128,7 +127,7 @@ Write-Success "Active adapter: $($adapter.Name) ($($adapter.InterfaceDescription
 Write-Info    "Current DNS:    $($currentDns -join ', ')"
 Write-Info    "Link speed:     $($adapter.LinkSpeed)"
 
-# ── Benchmark ──────────────────────────────────────────────────────────────────
+# -- Benchmark ------------------------------------------------------------------
 Write-Header "Benchmarking $($DnsServers.Count) DNS Servers"
 Write-Info "Testing $TestCount queries x $($TestDomains.Count) domains per server..."
 Write-Host ""
@@ -139,7 +138,7 @@ $serverIndex = 0
 foreach ($dns in $DnsServers) {
     $serverIndex++
     $pct = [math]::Floor(($serverIndex / $DnsServers.Count) * 100)
-    $bar = "█" * [math]::Floor($pct / 5) + "░" * (20 - [math]::Floor($pct / 5))
+    $bar = "#" * [math]::Floor($pct / 5) + "-" * (20 - [math]::Floor($pct / 5))
     Write-Host "`r  [$bar] $pct% - Testing $($dns.Name)...                    " -NoNewline -ForegroundColor White
 
     $latencies = @()
@@ -206,10 +205,10 @@ foreach ($dns in $DnsServers) {
     }
 }
 
-Write-Host "`r  [████████████████████] 100% - Done!                              " -ForegroundColor Green
+Write-Host "`r  [####################] 100% - Done!                              " -ForegroundColor Green
 Write-Host ""
 
-# ── Composite Scoring ──────────────────────────────────────────────────────────
+# -- Composite Scoring ----------------------------------------------------------
 # Weights: Speed 40%, Reliability 25%, Security 25%, Consistency 10%
 Write-Header "Calculating Composite Scores"
 
@@ -247,7 +246,7 @@ foreach ($r in $results) {
 # Sort by composite score descending
 $results = $results | Sort-Object -Property CompositeScore -Descending
 
-# ── Results Table ──────────────────────────────────────────────────────────────
+# -- Results Table --------------------------------------------------------------
 Write-Header "Results (Ranked by Composite Score)"
 Write-Host ""
 Write-Host ("  {0,-28} {1,10} {2,10} {3,10} {4,10} {5,12} {6,8} {7,8}" -f "DNS Server", "Avg (ms)", "Med (ms)", "Jitter", "Rely %", "Security", "Score", "Grade") -ForegroundColor White
@@ -257,14 +256,14 @@ $rank = 0
 foreach ($r in $results) {
     $rank++
     # Color coding
-    $color = switch {
+    $color = switch ($true) {
         ($r.CompositeScore -ge 80) { "Green" }
         ($r.CompositeScore -ge 60) { "Yellow" }
         ($r.CompositeScore -ge 40) { "DarkYellow" }
         default                     { "Red" }
     }
     # Letter grade
-    $grade = switch {
+    $grade = switch ($true) {
         ($r.CompositeScore -ge 90) { "A+" }
         ($r.CompositeScore -ge 85) { "A"  }
         ($r.CompositeScore -ge 80) { "A-" }
@@ -278,12 +277,12 @@ foreach ($r in $results) {
         default                     { "F"  }
     }
 
-    $prefix = if ($rank -le 3) { "★" } else { " " }
+    $prefix = if ($rank -le 3) { "*" } else { " " }
     Write-Host ("  $prefix {0,-27} {1,10} {2,10} {3,10} {4,9}% {5,11} {6,8} {7,6}" -f `
         $r.Name, $r.AvgLatency, $r.MedianLatency, $r.Jitter, $r.Reliability, "$($r.SecurityScore)/100", $r.CompositeScore, $grade) -ForegroundColor $color
 }
 
-# ── Winner Details ─────────────────────────────────────────────────────────────
+# -- Winner Details -------------------------------------------------------------
 $winner = $results[0]
 
 Write-Host ""
@@ -299,7 +298,7 @@ Write-Info    "Security score:   $($winner.SecurityScore)/100"
 Write-Info    "Composite score:  $($winner.CompositeScore)/100"
 Write-Info    "Features:         $($winner.Features)"
 
-# ── Export Report ──────────────────────────────────────────────────────────────
+# -- Export Report --------------------------------------------------------------
 if ($Report) {
     $reportPath = Join-Path $PSScriptRoot "DNS-Benchmark-Report_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').csv"
     $results | Select-Object Name, Primary, Secondary, AvgLatency, MedianLatency, MinLatency, MaxLatency, Jitter, Reliability, SecurityScore, CompositeScore, Features |
@@ -308,7 +307,7 @@ if ($Report) {
     Write-Success "Report saved to: $reportPath"
 }
 
-# ── Apply DNS ──────────────────────────────────────────────────────────────────
+# -- Apply DNS ------------------------------------------------------------------
 if (-not $SkipApply) {
     Write-Host ""
     Write-Header "Apply DNS Settings"

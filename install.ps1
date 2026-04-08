@@ -34,11 +34,11 @@ if (-not (Test-Path $installDir)) {
     Write-Host "  [+] Created: $installDir" -ForegroundColor Green
 }
 
-# Download latest script
+# Download script content as string (avoids file encoding issues with Get-Content)
 Write-Host "  [*] Downloading latest DNS-Benchmark.ps1..." -ForegroundColor Yellow
 try {
-    Invoke-WebRequest -Uri "$repoBase/DNS-Benchmark.ps1" -OutFile $scriptPath -UseBasicParsing
-    Write-Host "  [+] Downloaded to: $scriptPath" -ForegroundColor Green
+    $scriptContent = (New-Object System.Net.WebClient).DownloadString("$repoBase/DNS-Benchmark.ps1")
+    Write-Host "  [+] Downloaded ($([math]::Round($scriptContent.Length / 1KB, 1)) KB)" -ForegroundColor Green
 }
 catch {
     Write-Host "  [-] Download failed: $_" -ForegroundColor Red
@@ -48,24 +48,23 @@ catch {
     exit 1
 }
 
-# Verify file was downloaded
-if (-not (Test-Path $scriptPath) -or (Get-Item $scriptPath).Length -lt 1000) {
+if (-not $scriptContent -or $scriptContent.Length -lt 500) {
     Write-Host "  [-] Download appears incomplete or corrupt." -ForegroundColor Red
     Write-Host ""
     Read-Host "  Press Enter to exit"
     exit 1
 }
 
-Write-Host "  [+] File verified ($([math]::Round((Get-Item $scriptPath).Length / 1KB, 1)) KB)" -ForegroundColor Green
+# Save to disk for future manual use
+[System.IO.File]::WriteAllText($scriptPath, $scriptContent, [System.Text.Encoding]::UTF8)
+Write-Host "  [+] Saved to: $scriptPath" -ForegroundColor Green
 Write-Host ""
 Write-Host "  [*] Launching DNS Benchmark..." -ForegroundColor Yellow
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Run the benchmark by loading script content as a ScriptBlock.
-# This bypasses execution policy entirely since no .ps1 file is "executed" —
-# we read it as text and invoke the script block in-process.
-$scriptContent = Get-Content $scriptPath -Raw
+# Run directly from the in-memory string as a ScriptBlock.
+# This bypasses execution policy entirely — no .ps1 file is "loaded".
 $scriptBlock = [ScriptBlock]::Create($scriptContent)
 & $scriptBlock
 
