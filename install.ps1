@@ -62,8 +62,12 @@ Write-Host "  [*] Launching DNS Benchmark..." -ForegroundColor Yellow
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Run the benchmark (use child process to guarantee execution policy bypass)
-powershell.exe -ExecutionPolicy Bypass -NoProfile -File $scriptPath
+# Run the benchmark by loading script content as a ScriptBlock.
+# This bypasses execution policy entirely since no .ps1 file is "executed" —
+# we read it as text and invoke the script block in-process.
+$scriptContent = Get-Content $scriptPath -Raw
+$scriptBlock = [ScriptBlock]::Create($scriptContent)
+& $scriptBlock
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Cyan
