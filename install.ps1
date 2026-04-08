@@ -37,7 +37,8 @@ if (-not (Test-Path $installDir)) {
 # Download script content as string (avoids file encoding issues with Get-Content)
 Write-Host "  [*] Downloading latest DNS-Benchmark.ps1..." -ForegroundColor Yellow
 try {
-    $scriptContent = (New-Object System.Net.WebClient).DownloadString("$repoBase/DNS-Benchmark.ps1")
+    $cacheBust = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $scriptContent = (New-Object System.Net.WebClient).DownloadString("$repoBase/DNS-Benchmark.ps1?cb=$cacheBust")
     Write-Host "  [+] Downloaded ($([math]::Round($scriptContent.Length / 1KB, 1)) KB)" -ForegroundColor Green
 }
 catch {
@@ -62,6 +63,11 @@ Write-Host ""
 Write-Host "  [*] Launching DNS Benchmark..." -ForegroundColor Yellow
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
+
+# Pre-set directory variables so the script can find a valid path for backups/reports.
+# When run via ScriptBlock, $PSScriptRoot is empty — this fixes that.
+$ScriptDir = $installDir
+$PSScriptRoot = $installDir
 
 # Run directly from the in-memory string as a ScriptBlock.
 # This bypasses execution policy entirely — no .ps1 file is "loaded".
