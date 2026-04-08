@@ -40,14 +40,26 @@ A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliabil
 | Neustar UltraDNS | 64.6.64.6 | DNSSEC, enterprise-grade |
 | Level3 / CenturyLink | 4.2.2.1 | Basic DNS |
 
-## Quick Start
+## One-Line Install & Run
+
+Paste this into an **Administrator PowerShell** window — it downloads, benchmarks, and applies the best DNS automatically:
+
+```powershell
+irm https://raw.githubusercontent.com/TiltedLunar123/DNS-Benchmark/master/DNS-Benchmark.ps1 -OutFile "$env:TEMP\DNS-Benchmark.ps1"; Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$env:TEMP\DNS-Benchmark.ps1`""
+```
+
+That's it. It downloads the script to your temp folder, elevates to admin if needed, and runs the full benchmark.
+
+> **Want report mode?** Add `-Report` to the arguments. **Benchmark only?** Add `-SkipApply`.
+
+## Quick Start (Manual)
 
 ```powershell
 # Run as Administrator
 .\DNS-Benchmark.ps1
 ```
 
-That's it. The script will benchmark all DNS servers and ask before applying any changes.
+The script will benchmark all DNS servers and ask before applying any changes.
 
 ## Usage
 
