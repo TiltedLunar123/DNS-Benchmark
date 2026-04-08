@@ -62,13 +62,13 @@ Write-Host "  [*] Launching DNS Benchmark..." -ForegroundColor Yellow
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Run the benchmark
-& $scriptPath
+# Run the benchmark (use child process to guarantee execution policy bypass)
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File $scriptPath
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host "  [i] Script saved to: $scriptPath" -ForegroundColor Gray
-Write-Host "  [i] Run again anytime:  & '$scriptPath'" -ForegroundColor Gray
-Write-Host "  [i] Restore DNS:        & '$scriptPath' -Restore" -ForegroundColor Gray
+Write-Host "  [i] Run again:   powershell -ExecutionPolicy Bypass -File '$scriptPath'" -ForegroundColor Gray
+Write-Host "  [i] Restore DNS: powershell -ExecutionPolicy Bypass -File '$scriptPath' -Restore" -ForegroundColor Gray
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
