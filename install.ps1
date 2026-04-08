@@ -16,6 +16,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 # ── Running as Admin from here ────────────────────────────────────────────────
+Set-ExecutionPolicy Bypass -Scope Process -Force
 $ErrorActionPreference = "Stop"
 $installDir = Join-Path $env:USERPROFILE "DNS-Benchmark"
 $scriptPath = Join-Path $installDir "DNS-Benchmark.ps1"

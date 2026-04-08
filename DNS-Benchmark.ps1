@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     DNS Benchmark & Optimizer - Tests, scores, and applies the fastest and most secure DNS for your system.
@@ -33,6 +32,13 @@ param(
     [switch]$Restore,
     [switch]$Report
 )
+
+# ── Admin check ────────────────────────────────────────────────────────────────
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "  [-] This script must be run as Administrator." -ForegroundColor Red
+    Write-Host "  [i] Right-click PowerShell > 'Run as Administrator', or use install.ps1" -ForegroundColor Gray
+    exit 1
+}
 
 # ── Color helpers ──────────────────────────────────────────────────────────────
 function Write-Header  { param($Text) Write-Host "`n╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan; Write-Host "║  $Text" -ForegroundColor Cyan -NoNewline; Write-Host (" " * (61 - $Text.Length)) -NoNewline; Write-Host "║" -ForegroundColor Cyan; Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan }
