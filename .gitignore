@@ -1,2 +1,31 @@
+# DNS Benchmark output files
 *.csv
 dns-backup_*.txt
+
+# Test results
+test-results.xml
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# macOS
+.DS_Store
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.suo
+*.user

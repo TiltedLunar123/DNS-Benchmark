@@ -2,8 +2,9 @@
 
 A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliability, and security — then applies the best one to your system automatically.
 
+[![CI](https://github.com/TiltedLunar123/DNS-Benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/TiltedLunar123/DNS-Benchmark/actions/workflows/ci.yml)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)
-![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows)
+![Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ## What It Does

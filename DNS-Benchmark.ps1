@@ -27,6 +27,7 @@
 
 [CmdletBinding()]
 param(
+    [ValidateRange(1, 100)]
     [int]$TestCount = 5,
     [switch]$SkipApply,
     [switch]$Restore,
@@ -50,6 +51,203 @@ function Write-Status  { param($Text) Write-Host "  [*] $Text" -ForegroundColor 
 function Write-Success { param($Text) Write-Host "  [+] $Text" -ForegroundColor Green }
 function Write-Err     { param($Text) Write-Host "  [-] $Text" -ForegroundColor Red }
 function Write-Info    { param($Text) Write-Host "  [i] $Text" -ForegroundColor Gray }
+
+# -- Testable Functions ---------------------------------------------------------
+
+function Get-ActiveNetworkAdapter {
+    <#
+    .SYNOPSIS
+        Returns the first active, non-virtual, non-Bluetooth network adapter.
+    #>
+    Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth"
+    } | Select-Object -First 1
+}
+
+function Get-DnsServerResults {
+    <#
+    .SYNOPSIS
+        Benchmarks a single DNS server across multiple domains and returns statistics.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$DnsServer,
+        [Parameter(Mandatory)]
+        [string[]]$Domains,
+        [Parameter(Mandatory)]
+        [int]$QueryCount
+    )
+
+    $latencies = @()
+    $failures = 0
+    $totalQueries = $QueryCount * $Domains.Count
+
+    foreach ($domain in $Domains) {
+        for ($i = 0; $i -lt $QueryCount; $i++) {
+            try {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $null = Resolve-DnsName -Name $domain -Server $DnsServer.Primary -DnsOnly -Type A -ErrorAction Stop
+                $sw.Stop()
+                $latencies += $sw.Elapsed.TotalMilliseconds
+            }
+            catch {
+                $failures++
+            }
+        }
+    }
+
+    if ($latencies.Count -gt 0) {
+        $sorted = $latencies | Sort-Object
+        $avgLatency = [math]::Round(($latencies | Measure-Object -Average).Average, 2)
+        $minLatency = [math]::Round(($latencies | Measure-Object -Minimum).Minimum, 2)
+        $maxLatency = [math]::Round(($latencies | Measure-Object -Maximum).Maximum, 2)
+        $mid = [math]::Floor($sorted.Count / 2)
+        $medianLatency = if ($sorted.Count % 2 -eq 0) {
+            [math]::Round(($sorted[$mid - 1] + $sorted[$mid]) / 2, 2)
+        } else {
+            [math]::Round($sorted[$mid], 2)
+        }
+        $mean = ($latencies | Measure-Object -Average).Average
+        $variance = ($latencies | ForEach-Object { [math]::Pow($_ - $mean, 2) } | Measure-Object -Average).Average
+        $jitter = [math]::Round([math]::Sqrt($variance), 2)
+        $reliability = [math]::Round((($totalQueries - $failures) / $totalQueries) * 100, 1)
+    }
+    else {
+        $avgLatency = 9999
+        $minLatency = 9999
+        $maxLatency = 9999
+        $medianLatency = 9999
+        $jitter = 9999
+        $reliability = 0
+    }
+
+    [PSCustomObject]@{
+        Name          = $DnsServer.Name
+        Primary       = $DnsServer.Primary
+        Secondary     = $DnsServer.Secondary
+        AvgLatency    = $avgLatency
+        MinLatency    = $minLatency
+        MaxLatency    = $maxLatency
+        MedianLatency = $medianLatency
+        Jitter        = $jitter
+        Reliability   = $reliability
+        SecurityScore = $DnsServer.SecurityScore
+        Features      = $DnsServer.Features
+        Failures      = $failures
+        TotalQueries  = $totalQueries
+        CompositeScore = 0
+    }
+}
+
+function Get-CompositeScore {
+    <#
+    .SYNOPSIS
+        Calculates a weighted composite score for a DNS benchmark result.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Result,
+        [Parameter(Mandatory)]
+        [double]$MaxLatencyBound,
+        [Parameter(Mandatory)]
+        [double]$MinLatencyBound,
+        [Parameter(Mandatory)]
+        [double]$MaxJitterBound
+    )
+
+    if ($Result.AvgLatency -ge 9999) { return 0 }
+
+    $latencyRange = $MaxLatencyBound - $MinLatencyBound
+    $speedScore = if ($latencyRange -gt 0) {
+        [math]::Round((1 - (($Result.AvgLatency - $MinLatencyBound) / $latencyRange)) * 100, 1)
+    } else { 100 }
+
+    $consistencyScore = if ($MaxJitterBound -gt 0) {
+        [math]::Round((1 - ($Result.Jitter / $MaxJitterBound)) * 100, 1)
+    } else { 100 }
+
+    [math]::Round(
+        ($speedScore * 0.40) +
+        ($Result.Reliability * 0.25) +
+        ($Result.SecurityScore * 0.25) +
+        ($consistencyScore * 0.10),
+        1
+    )
+}
+
+function Get-LetterGrade {
+    <#
+    .SYNOPSIS
+        Maps a composite score (0-100) to a letter grade.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [double]$Score
+    )
+
+    if     ($Score -ge 90) { "A+" }
+    elseif ($Score -ge 85) { "A"  }
+    elseif ($Score -ge 80) { "A-" }
+    elseif ($Score -ge 75) { "B+" }
+    elseif ($Score -ge 70) { "B"  }
+    elseif ($Score -ge 65) { "B-" }
+    elseif ($Score -ge 60) { "C+" }
+    elseif ($Score -ge 55) { "C"  }
+    elseif ($Score -ge 50) { "C-" }
+    elseif ($Score -ge 40) { "D"  }
+    else                   { "F"  }
+}
+
+function Backup-DnsSettings {
+    <#
+    .SYNOPSIS
+        Saves current DNS settings to a timestamped JSON backup file.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupDir,
+        [Parameter(Mandatory)]
+        [string]$AdapterName,
+        [Parameter(Mandatory)]
+        [int]$InterfaceIndex,
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDns
+    )
+
+    if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null }
+
+    $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
+    @{
+        Adapter      = $AdapterName
+        InterfaceIdx = $InterfaceIndex
+        PreviousDNS  = $CurrentDns -join ","
+        Timestamp    = (Get-Date).ToString("o")
+    } | ConvertTo-Json | Out-File -FilePath $backupPath -Encoding UTF8
+
+    $backupPath
+}
+
+function Set-OptimalDns {
+    <#
+    .SYNOPSIS
+        Applies DNS servers to a network adapter and flushes the DNS cache.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$InterfaceIndex,
+        [Parameter(Mandatory)]
+        [string]$PrimaryDns,
+        [Parameter(Mandatory)]
+        [string]$SecondaryDns
+    )
+
+    Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses @($PrimaryDns, $SecondaryDns)
+    $null = Clear-DnsClientCache 2>$null
+
+    $newDns = (Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4).ServerAddresses
+    $newDns[0] -eq $PrimaryDns
+}
 
 # -- Banner ---------------------------------------------------------------------
 Clear-Host
@@ -104,7 +302,7 @@ $TestDomains = @(
 if ($Restore) {
     Write-Header "Restoring DNS to Automatic (DHCP)"
 
-    $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth" } | Select-Object -First 1
+    $adapter = Get-ActiveNetworkAdapter
     if (-not $adapter) {
         Write-Err "No active network adapter found."
         exit 1
@@ -120,7 +318,7 @@ if ($Restore) {
 # -- Detect active adapter -----------------------------------------------------
 Write-Header "System Detection"
 
-$adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth" } | Select-Object -First 1
+$adapter = Get-ActiveNetworkAdapter
 if (-not $adapter) {
     Write-Err "No active network adapter found. Are you connected to a network?"
     exit 1
@@ -145,68 +343,7 @@ foreach ($dns in $DnsServers) {
     $bar = "#" * [math]::Floor($pct / 5) + "-" * (20 - [math]::Floor($pct / 5))
     Write-Host "`r  [$bar] $pct% - Testing $($dns.Name)...                    " -NoNewline -ForegroundColor White
 
-    $latencies = @()
-    $failures = 0
-    $totalQueries = $TestCount * $TestDomains.Count
-
-    foreach ($domain in $TestDomains) {
-        for ($i = 0; $i -lt $TestCount; $i++) {
-            try {
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $null = Resolve-DnsName -Name $domain -Server $dns.Primary -DnsOnly -Type A -ErrorAction Stop
-                $sw.Stop()
-                $latencies += $sw.Elapsed.TotalMilliseconds
-            }
-            catch {
-                $failures++
-            }
-        }
-    }
-
-    # Calculate stats
-    if ($latencies.Count -gt 0) {
-        $sorted = $latencies | Sort-Object
-        $avgLatency = [math]::Round(($latencies | Measure-Object -Average).Average, 2)
-        $minLatency = [math]::Round(($latencies | Measure-Object -Minimum).Minimum, 2)
-        $maxLatency = [math]::Round(($latencies | Measure-Object -Maximum).Maximum, 2)
-        # Median
-        $mid = [math]::Floor($sorted.Count / 2)
-        $medianLatency = if ($sorted.Count % 2 -eq 0) {
-            [math]::Round(($sorted[$mid - 1] + $sorted[$mid]) / 2, 2)
-        } else {
-            [math]::Round($sorted[$mid], 2)
-        }
-        # Jitter (standard deviation)
-        $mean = ($latencies | Measure-Object -Average).Average
-        $variance = ($latencies | ForEach-Object { [math]::Pow($_ - $mean, 2) } | Measure-Object -Average).Average
-        $jitter = [math]::Round([math]::Sqrt($variance), 2)
-        $reliability = [math]::Round((($totalQueries - $failures) / $totalQueries) * 100, 1)
-    }
-    else {
-        $avgLatency = 9999
-        $minLatency = 9999
-        $maxLatency = 9999
-        $medianLatency = 9999
-        $jitter = 9999
-        $reliability = 0
-    }
-
-    $results += [PSCustomObject]@{
-        Name          = $dns.Name
-        Primary       = $dns.Primary
-        Secondary     = $dns.Secondary
-        AvgLatency    = $avgLatency
-        MinLatency    = $minLatency
-        MaxLatency    = $maxLatency
-        MedianLatency = $medianLatency
-        Jitter        = $jitter
-        Reliability   = $reliability
-        SecurityScore = $dns.SecurityScore
-        Features      = $dns.Features
-        Failures      = $failures
-        TotalQueries  = $totalQueries
-        CompositeScore = 0  # calculated next
-    }
+    $results += Get-DnsServerResults -DnsServer $dns -Domains $TestDomains -QueryCount $TestCount
 }
 
 Write-Host "`r  [####################] 100% - Done!                              " -ForegroundColor Green
@@ -216,35 +353,12 @@ Write-Host ""
 # Weights: Speed 40%, Reliability 25%, Security 25%, Consistency 10%
 Write-Header "Calculating Composite Scores"
 
-$maxLatency = ($results | Where-Object { $_.AvgLatency -lt 9999 } | Measure-Object -Property AvgLatency -Maximum).Maximum
-$minLatencyVal = ($results | Where-Object { $_.AvgLatency -lt 9999 } | Measure-Object -Property AvgLatency -Minimum).Minimum
-$maxJitter = ($results | Where-Object { $_.Jitter -lt 9999 } | Measure-Object -Property Jitter -Maximum).Maximum
+$maxLatencyBound = ($results | Where-Object { $_.AvgLatency -lt 9999 } | Measure-Object -Property AvgLatency -Maximum).Maximum
+$minLatencyBound = ($results | Where-Object { $_.AvgLatency -lt 9999 } | Measure-Object -Property AvgLatency -Minimum).Minimum
+$maxJitterBound  = ($results | Where-Object { $_.Jitter -lt 9999 } | Measure-Object -Property Jitter -Maximum).Maximum
 
 foreach ($r in $results) {
-    if ($r.AvgLatency -ge 9999) {
-        $r.CompositeScore = 0
-        continue
-    }
-
-    # Normalize speed: lower latency = higher score (0-100)
-    $latencyRange = $maxLatency - $minLatencyVal
-    $speedScore = if ($latencyRange -gt 0) {
-        [math]::Round((1 - (($r.AvgLatency - $minLatencyVal) / $latencyRange)) * 100, 1)
-    } else { 100 }
-
-    # Normalize consistency: lower jitter = higher score (0-100)
-    $consistencyScore = if ($maxJitter -gt 0) {
-        [math]::Round((1 - ($r.Jitter / $maxJitter)) * 100, 1)
-    } else { 100 }
-
-    # Composite: Speed 40% + Reliability 25% + Security 25% + Consistency 10%
-    $r.CompositeScore = [math]::Round(
-        ($speedScore * 0.40) +
-        ($r.Reliability * 0.25) +
-        ($r.SecurityScore * 0.25) +
-        ($consistencyScore * 0.10),
-        1
-    )
+    $r.CompositeScore = Get-CompositeScore -Result $r -MaxLatencyBound $maxLatencyBound -MinLatencyBound $minLatencyBound -MaxJitterBound $maxJitterBound
 }
 
 # Sort by composite score descending
@@ -259,31 +373,15 @@ Write-Host ("  " + "-" * 106) -ForegroundColor DarkGray
 $rank = 0
 foreach ($r in $results) {
     $rank++
-    # Color coding
-    $color = switch ($true) {
-        ($r.CompositeScore -ge 80) { "Green" }
-        ($r.CompositeScore -ge 60) { "Yellow" }
-        ($r.CompositeScore -ge 40) { "DarkYellow" }
-        default                     { "Red" }
-    }
-    # Letter grade
-    $grade = switch ($true) {
-        ($r.CompositeScore -ge 90) { "A+" }
-        ($r.CompositeScore -ge 85) { "A"  }
-        ($r.CompositeScore -ge 80) { "A-" }
-        ($r.CompositeScore -ge 75) { "B+" }
-        ($r.CompositeScore -ge 70) { "B"  }
-        ($r.CompositeScore -ge 65) { "B-" }
-        ($r.CompositeScore -ge 60) { "C+" }
-        ($r.CompositeScore -ge 55) { "C"  }
-        ($r.CompositeScore -ge 50) { "C-" }
-        ($r.CompositeScore -ge 40) { "D"  }
-        default                     { "F"  }
-    }
+    $color = if     ($r.CompositeScore -ge 80) { "Green" }
+             elseif ($r.CompositeScore -ge 60) { "Yellow" }
+             elseif ($r.CompositeScore -ge 40) { "DarkYellow" }
+             else                               { "Red" }
+    $grade = Get-LetterGrade -Score $r.CompositeScore
 
     $prefix = if ($rank -le 3) { "*" } else { " " }
-    Write-Host ("  $prefix {0,-27} {1,10} {2,10} {3,10} {4,9}% {5,11} {6,8} {7,6}" -f `
-        $r.Name, $r.AvgLatency, $r.MedianLatency, $r.Jitter, $r.Reliability, "$($r.SecurityScore)/100", $r.CompositeScore, $grade) -ForegroundColor $color
+    $line = "  $prefix {0,-27} {1,10} {2,10} {3,10} {4,9}% {5,11} {6,8} {7,6}" -f $r.Name, $r.AvgLatency, $r.MedianLatency, $r.Jitter, $r.Reliability, "$($r.SecurityScore)/100", $r.CompositeScore, $grade
+    Write-Host $line -ForegroundColor $color
 }
 
 # -- Winner Details -------------------------------------------------------------
@@ -330,26 +428,12 @@ if (-not $SkipApply) {
     $confirm = Read-Host "  Apply these settings? (Y/n)"
     if ($confirm -match "^[Yy]?$") {
         try {
-            # Backup current settings
-            $backupPath = Join-Path $ScriptDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
-            @{
-                Adapter      = $adapter.Name
-                InterfaceIdx = $adapter.InterfaceIndex
-                PreviousDNS  = $currentDns -join ","
-                Timestamp    = (Get-Date).ToString("o")
-            } | ConvertTo-Json | Out-File -FilePath $backupPath -Encoding UTF8
-
+            $backupPath = Backup-DnsSettings -BackupDir $ScriptDir -AdapterName $adapter.Name -InterfaceIndex $adapter.InterfaceIndex -CurrentDns $currentDns
             Write-Info "Backup saved: $backupPath"
 
-            # Apply new DNS
-            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses @($winner.Primary, $winner.Secondary)
+            $applied = Set-OptimalDns -InterfaceIndex $adapter.InterfaceIndex -PrimaryDns $winner.Primary -SecondaryDns $winner.Secondary
 
-            # Flush DNS cache
-            $null = Clear-DnsClientCache 2>$null
-
-            # Verify
-            $newDns = (Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4).ServerAddresses
-            if ($newDns[0] -eq $winner.Primary) {
+            if ($applied) {
                 Write-Host ""
                 Write-Success "DNS changed to $($winner.Name) ($($winner.Primary), $($winner.Secondary))"
                 Write-Success "DNS cache flushed"
