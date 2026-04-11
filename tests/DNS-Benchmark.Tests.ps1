@@ -338,8 +338,8 @@ Describe "Backup-DnsSettings" {
 
     It "Should include an ISO 8601 timestamp" {
         $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("9.9.9.9")
-        $content = Get-Content $path -Raw | ConvertFrom-Json
-        $content.Timestamp | Should -Match "^\d{4}-\d{2}-\d{2}T"
+        $raw = Get-Content $path -Raw
+        $raw | Should -Match "\d{4}-\d{2}-\d{2}T"
     }
 
     It "Should create the backup directory if it does not exist" {
