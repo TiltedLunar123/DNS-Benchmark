@@ -147,6 +147,28 @@ Describe "Get-CompositeScore" {
             $score | Should -Be 92.5
         }
 
+        It "Should clamp to zero when jitter exceeds MaxJitterBound" {
+            $result = [PSCustomObject]@{
+                AvgLatency    = 10.0
+                Jitter        = 80.0
+                Reliability   = 100.0
+                SecurityScore = 90
+            }
+            $score = Get-CompositeScore -Result $result -MaxLatencyBound 100 -MinLatencyBound 10 -MaxJitterBound 50
+            $score | Should -BeGreaterOrEqual 0
+        }
+
+        It "Should never return a negative score" {
+            $result = [PSCustomObject]@{
+                AvgLatency    = 200.0
+                Jitter        = 150.0
+                Reliability   = 50.0
+                SecurityScore = 30
+            }
+            $score = Get-CompositeScore -Result $result -MaxLatencyBound 100 -MinLatencyBound 10 -MaxJitterBound 50
+            $score | Should -BeGreaterOrEqual 0
+        }
+
         It "Should handle zero jitter bound" {
             $result = [PSCustomObject]@{
                 AvgLatency    = 20.0
