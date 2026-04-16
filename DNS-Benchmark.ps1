@@ -159,11 +159,11 @@ function Get-CompositeScore {
 
     $latencyRange = $MaxLatencyBound - $MinLatencyBound
     $speedScore = if ($latencyRange -gt 0) {
-        [math]::Round((1 - (($Result.AvgLatency - $MinLatencyBound) / $latencyRange)) * 100, 1)
+        [math]::Max(0, [math]::Round((1 - (($Result.AvgLatency - $MinLatencyBound) / $latencyRange)) * 100, 1))
     } else { 100 }
 
     $consistencyScore = if ($MaxJitterBound -gt 0) {
-        [math]::Round((1 - ($Result.Jitter / $MaxJitterBound)) * 100, 1)
+        [math]::Max(0, [math]::Round((1 - ($Result.Jitter / $MaxJitterBound)) * 100, 1))
     } else { 100 }
 
     [math]::Round(
@@ -246,11 +246,11 @@ function Set-OptimalDns {
     $null = Clear-DnsClientCache 2>$null
 
     $newDns = (Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4).ServerAddresses
-    $newDns[0] -eq $PrimaryDns
+    if (-not $newDns -or $newDns.Count -eq 0) { return $false }
+    ($newDns[0] -eq $PrimaryDns) -and ($newDns.Count -ge 2 -and $newDns[1] -eq $SecondaryDns)
 }
 
 # -- Banner ---------------------------------------------------------------------
-Clear-Host
 Write-Host ""
 Write-Host "   ____  _   _ ____  " -ForegroundColor Cyan
 Write-Host "  |  _ \| \ | / ___| " -ForegroundColor Cyan
@@ -403,7 +403,13 @@ Write-Info    "Features:         $($winner.Features)"
 # -- Export Report --------------------------------------------------------------
 if ($Report) {
     $reportPath = Join-Path $ScriptDir "DNS-Benchmark-Report_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').csv"
-    $results | Select-Object Name, Primary, Secondary, AvgLatency, MedianLatency, MinLatency, MaxLatency, Jitter, Reliability, SecurityScore, CompositeScore, Features |
+    $rank = 0
+    $results | ForEach-Object {
+        $rank++
+        $_ | Add-Member -NotePropertyName "Rank" -NotePropertyValue $rank -Force
+        $_ | Add-Member -NotePropertyName "Grade" -NotePropertyValue (Get-LetterGrade -Score $_.CompositeScore) -Force
+        $_
+    } | Select-Object Rank, Name, Primary, Secondary, AvgLatency, MedianLatency, MinLatency, MaxLatency, Jitter, Reliability, SecurityScore, CompositeScore, Grade, Features |
         Export-Csv -Path $reportPath -NoTypeInformation
     Write-Host ""
     Write-Success "Report saved to: $reportPath"
