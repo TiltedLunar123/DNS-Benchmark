@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     One-click installer & runner for DNS Benchmark & Optimizer.
     Downloads the latest version, self-elevates to admin, and runs the benchmark.
@@ -68,7 +68,6 @@ Write-Host ""
 # Pre-set directory variables so the script can find a valid path for backups/reports.
 # When run via ScriptBlock, $PSScriptRoot is empty — this fixes that.
 $ScriptDir = $installDir
-$PSScriptRoot = $installDir
 
 # Run directly from the in-memory string as a ScriptBlock.
 # This bypasses execution policy entirely — no .ps1 file is "loaded".
