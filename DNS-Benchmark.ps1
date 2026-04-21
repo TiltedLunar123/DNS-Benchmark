@@ -217,7 +217,7 @@ function Backup-DnsSettings {
 
     if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null }
 
-    $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
+    $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
     @{
         Adapter      = $AdapterName
         InterfaceIdx = $InterfaceIndex
