@@ -217,7 +217,7 @@ function Backup-DnsSettings {
 
     if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null }
 
-    $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
+    $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
     @{
         Adapter      = $AdapterName
         InterfaceIdx = $InterfaceIndex
@@ -242,10 +242,18 @@ function Set-OptimalDns {
         [string]$SecondaryDns
     )
 
-    Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses @($PrimaryDns, $SecondaryDns)
+    try {
+        Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses @($PrimaryDns, $SecondaryDns) -ErrorAction Stop
+    } catch {
+        return $false
+    }
     $null = Clear-DnsClientCache 2>$null
 
-    $newDns = (Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4).ServerAddresses
+    try {
+        $newDns = (Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses
+    } catch {
+        return $false
+    }
     if (-not $newDns -or $newDns.Count -eq 0) { return $false }
     ($newDns[0] -eq $PrimaryDns) -and ($newDns.Count -ge 2 -and $newDns[1] -eq $SecondaryDns)
 }

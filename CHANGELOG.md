@@ -2,6 +2,15 @@
 
 All notable changes to DNS Benchmark & Optimizer are documented here.
 
+## [Unreleased]
+
+### Fixed
+- `Set-OptimalDns` now returns `$false` on error instead of throwing, matching the documented boolean contract. Both the DNS apply and verify calls are wrapped with `-ErrorAction Stop` and try/catch (#20).
+- DNS backup files now use a `.json` extension instead of `.txt` so their contents match the name at a glance (#21). `.gitignore` updated to match.
+
+### Added
+- Pester coverage for `Set-OptimalDns` (success plus two failure paths) and the backup file extension.
+
 ## [1.1.0] — 2026-04-11
 
 ### Added

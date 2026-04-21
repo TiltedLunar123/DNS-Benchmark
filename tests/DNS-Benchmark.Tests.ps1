@@ -369,6 +369,47 @@ Describe "Backup-DnsSettings" {
         $path = Backup-DnsSettings -BackupDir $newDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1")
         Test-Path $path | Should -BeTrue
     }
+
+    It "Should use a .json extension for the backup file" {
+        $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1")
+        $path | Should -Match "dns-backup_.+\.json$"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Set-OptimalDns
+# ---------------------------------------------------------------------------
+Describe "Set-OptimalDns" {
+    It "Should return `$false when Set-DnsClientServerAddress throws" {
+        Mock Set-DnsClientServerAddress { throw "invalid interface" }
+        Mock Clear-DnsClientCache { }
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @("1.1.1.1", "1.0.0.1") }
+        }
+
+        $result = Set-OptimalDns -InterfaceIndex 999 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1"
+        $result | Should -Be $false
+    }
+
+    It "Should return `$false when Get-DnsClientServerAddress throws" {
+        Mock Set-DnsClientServerAddress { }
+        Mock Clear-DnsClientCache { }
+        Mock Get-DnsClientServerAddress { throw "adapter gone" }
+
+        $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1"
+        $result | Should -Be $false
+    }
+
+    It "Should return `$true when both DNS servers are applied correctly" {
+        Mock Set-DnsClientServerAddress { }
+        Mock Clear-DnsClientCache { }
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @("1.1.1.1", "1.0.0.1") }
+        }
+
+        $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1"
+        $result | Should -Be $true
+    }
 }
 
 # ---------------------------------------------------------------------------

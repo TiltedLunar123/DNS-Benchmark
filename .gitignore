@@ -3,7 +3,7 @@ PLAN_TODAY.md
 
 # DNS Benchmark output files
 *.csv
-dns-backup_*.txt
+dns-backup_*.json
 
 # Test results
 test-results.xml
