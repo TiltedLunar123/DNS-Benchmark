@@ -393,7 +393,9 @@ Describe "Backup-DnsSettings" {
                 $remaining = @(Get-ChildItem $retentionDir -Filter "dns-backup_*.json")
 
                 $remaining.Count | Should -Be 5
-                $remaining.FullName | Should -Contain $newPath
+                # Compare leaf names so 8.3 short paths (e.g. RUNNER~1) vs long paths
+                # don't break the assertion across environments.
+                $remaining.Name | Should -Contain (Split-Path $newPath -Leaf)
             } finally {
                 Remove-Item $retentionDir -Recurse -Force -ErrorAction SilentlyContinue
             }
