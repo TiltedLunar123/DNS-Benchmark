@@ -7,9 +7,14 @@ All notable changes to DNS Benchmark & Optimizer are documented here.
 ### Fixed
 - `Set-OptimalDns` now returns `$false` on error instead of throwing, matching the documented boolean contract. Both the DNS apply and verify calls are wrapped with `-ErrorAction Stop` and try/catch (#20).
 - DNS backup files now use a `.json` extension instead of `.txt` so their contents match the name at a glance (#21). `.gitignore` updated to match.
+- `Resolve-DnsName` calls in the benchmark loop now use `-QuickTimeout`, so an unresponsive resolver no longer stalls the whole run for minutes (#6).
+- `$ScriptDir` resolution now prefers `$PSScriptRoot` when the script is run as a real `.ps1` file, then falls back to the caller-supplied `$ScriptDir`, then to the user-profile default. Backups and reports now land next to the script when run standalone (#17).
+- `-Restore` mode probes `Win32_NetworkAdapterConfiguration.DNSServerSearchOrder` first and reports "already using DHCP" instead of pretending to restore a setting that was never overridden (#16).
+- Progress bar lines are padded to a fixed width derived from the longest server name, so the previous server name no longer leaks through when shorter names follow (#11).
 
 ### Added
-- Pester coverage for `Set-OptimalDns` (success plus two failure paths) and the backup file extension.
+- `-MaxBackups` parameter on `Backup-DnsSettings` (default 10) prunes older `dns-backup_*.json` files after each new write so they no longer accumulate forever (#7).
+- Pester coverage for `Set-OptimalDns` (success plus two failure paths), the backup file extension, the new retention behavior, and `Test-StaticDnsConfigured`.
 
 ## [1.1.0] — 2026-04-11
 

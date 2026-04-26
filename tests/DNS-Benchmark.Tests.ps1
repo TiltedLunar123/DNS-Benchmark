@@ -374,6 +374,80 @@ Describe "Backup-DnsSettings" {
         $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1")
         $path | Should -Match "dns-backup_.+\.json$"
     }
+
+    Context "Backup retention (#7)" {
+        It "Should prune older backups beyond -MaxBackups" {
+            $retentionDir = Join-Path $env:TEMP "pester-dns-retention-$(Get-Random)"
+            New-Item -Path $retentionDir -ItemType Directory -Force | Out-Null
+
+            try {
+                # Seed with 8 stale backup files so we can confirm pruning order.
+                for ($i = 0; $i -lt 8; $i++) {
+                    $stale = Join-Path $retentionDir ("dns-backup_2025-01-{0:D2}_000000.json" -f ($i + 1))
+                    "{}" | Out-File -FilePath $stale -Encoding UTF8
+                    # Backdate so retention orders by LastWriteTime deterministically.
+                    (Get-Item $stale).LastWriteTime = (Get-Date).AddDays(-30 + $i)
+                }
+
+                $newPath = Backup-DnsSettings -BackupDir $retentionDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1") -MaxBackups 5
+                $remaining = @(Get-ChildItem $retentionDir -Filter "dns-backup_*.json")
+
+                $remaining.Count | Should -Be 5
+                # Compare leaf names so 8.3 short paths (e.g. RUNNER~1) vs long paths
+                # don't break the assertion across environments.
+                $remaining.Name | Should -Contain (Split-Path $newPath -Leaf)
+            } finally {
+                Remove-Item $retentionDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should keep all backups when count is at or below -MaxBackups" {
+            $smallDir = Join-Path $env:TEMP "pester-dns-retention-small-$(Get-Random)"
+            New-Item -Path $smallDir -ItemType Directory -Force | Out-Null
+
+            try {
+                $p1 = Backup-DnsSettings -BackupDir $smallDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1") -MaxBackups 10
+                Start-Sleep -Milliseconds 1100  # ensure distinct timestamp filename
+                $p2 = Backup-DnsSettings -BackupDir $smallDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("1.1.1.1") -MaxBackups 10
+
+                Test-Path $p1 | Should -BeTrue
+                Test-Path $p2 | Should -BeTrue
+            } finally {
+                Remove-Item $smallDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Test-StaticDnsConfigured (#16 - restore mode DHCP detection)
+# ---------------------------------------------------------------------------
+Describe "Test-StaticDnsConfigured" {
+    It "Should return `$false when adapter has no static DNS list (DHCP-only)" {
+        Mock Get-CimInstance {
+            [PSCustomObject]@{ DNSServerSearchOrder = @() }
+        }
+        Test-StaticDnsConfigured -InterfaceIndex 5 | Should -Be $false
+    }
+
+    It "Should return `$false when DNSServerSearchOrder is `$null" {
+        Mock Get-CimInstance {
+            [PSCustomObject]@{ DNSServerSearchOrder = $null }
+        }
+        Test-StaticDnsConfigured -InterfaceIndex 5 | Should -Be $false
+    }
+
+    It "Should return `$true when adapter has a static DNS list" {
+        Mock Get-CimInstance {
+            [PSCustomObject]@{ DNSServerSearchOrder = @("1.1.1.1", "1.0.0.1") }
+        }
+        Test-StaticDnsConfigured -InterfaceIndex 5 | Should -Be $true
+    }
+
+    It "Should fail-safe to `$true when CIM query throws (caller still resets)" {
+        Mock Get-CimInstance { throw "WMI unavailable" }
+        Test-StaticDnsConfigured -InterfaceIndex 5 | Should -Be $true
+    }
 }
 
 # ---------------------------------------------------------------------------
