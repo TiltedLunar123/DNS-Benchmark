@@ -41,8 +41,13 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 1
 }
 
-# -- Script directory (fallback for when run via ScriptBlock/iex where $ScriptDir is empty)
-$ScriptDir = if ($ScriptDir) { $ScriptDir } else { Join-Path $env:USERPROFILE "DNS-Benchmark" }
+# -- Script directory ----------------------------------------------------------
+# Order: $PSScriptRoot (set when run as a real .ps1 file), then a caller-supplied
+# $ScriptDir (set by install.ps1 before invoking via ScriptBlock), then a default
+# user-profile path for ad-hoc `iex` runs where neither is available.
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot }
+             elseif ($ScriptDir) { $ScriptDir }
+             else { Join-Path $env:USERPROFILE "DNS-Benchmark" }
 if (-not (Test-Path $ScriptDir)) { New-Item -ItemType Directory -Path $ScriptDir -Force | Out-Null }
 
 # -- Color helpers --------------------------------------------------------------
@@ -86,7 +91,9 @@ function Get-DnsServerResults {
         for ($i = 0; $i -lt $QueryCount; $i++) {
             try {
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $null = Resolve-DnsName -Name $domain -Server $DnsServer.Primary -DnsOnly -Type A -ErrorAction Stop
+                # -QuickTimeout shortens the per-query timeout so a single unresponsive
+                # server cannot stall the whole benchmark for minutes (#6).
+                $null = Resolve-DnsName -Name $domain -Server $DnsServer.Primary -DnsOnly -Type A -QuickTimeout -ErrorAction Stop
                 $sw.Stop()
                 $latencies += $sw.Elapsed.TotalMilliseconds
             }
@@ -201,7 +208,8 @@ function Get-LetterGrade {
 function Backup-DnsSettings {
     <#
     .SYNOPSIS
-        Saves current DNS settings to a timestamped JSON backup file.
+        Saves current DNS settings to a timestamped JSON backup file and prunes
+        older backups beyond -MaxBackups so they do not accumulate forever (#7).
     #>
     param(
         [Parameter(Mandatory)]
@@ -212,7 +220,9 @@ function Backup-DnsSettings {
         [int]$InterfaceIndex,
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
-        [string[]]$CurrentDns
+        [string[]]$CurrentDns,
+        [ValidateRange(1, 1000)]
+        [int]$MaxBackups = 10
     )
 
     if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null }
@@ -225,7 +235,37 @@ function Backup-DnsSettings {
         Timestamp    = (Get-Date).ToString("o")
     } | ConvertTo-Json | Out-File -FilePath $backupPath -Encoding UTF8
 
+    $existing = @(Get-ChildItem -Path $BackupDir -Filter "dns-backup_*.json" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending)
+    if ($existing.Count -gt $MaxBackups) {
+        $existing | Select-Object -Skip $MaxBackups | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
     $backupPath
+}
+
+function Test-StaticDnsConfigured {
+    <#
+    .SYNOPSIS
+        Returns $true when the adapter has a static DNS server list configured,
+        $false when the adapter is using DHCP-supplied DNS only.
+    .DESCRIPTION
+        Win32_NetworkAdapterConfiguration.DNSServerSearchOrder reflects the static
+        override list. It is empty/null when the adapter is using DHCP-supplied DNS.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$InterfaceIndex
+    )
+
+    try {
+        $cfg = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$InterfaceIndex" -ErrorAction Stop
+    } catch {
+        return $true
+    }
+    if (-not $cfg) { return $true }
+    $static = $cfg.DNSServerSearchOrder
+    [bool]($static -and $static.Count -gt 0)
 }
 
 function Set-OptimalDns {
@@ -317,6 +357,12 @@ if ($Restore) {
     }
 
     Write-Status "Adapter: $($adapter.Name)"
+
+    if (-not (Test-StaticDnsConfigured -InterfaceIndex $adapter.InterfaceIndex)) {
+        Write-Info "'$($adapter.Name)' is already using DHCP-supplied DNS. Nothing to restore."
+        exit 0
+    }
+
     Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
     Write-Success "DNS restored to automatic (DHCP) on '$($adapter.Name)'"
     Write-Info "You may need to run: ipconfig /flushdns"
@@ -344,17 +390,21 @@ Write-Host ""
 
 $results = @()
 $serverIndex = 0
+$maxNameLen = ($DnsServers | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+$progressWidth = 32 + $maxNameLen
 
 foreach ($dns in $DnsServers) {
     $serverIndex++
     $pct = [math]::Floor(($serverIndex / $DnsServers.Count) * 100)
     $bar = "#" * [math]::Floor($pct / 5) + "-" * (20 - [math]::Floor($pct / 5))
-    Write-Host "`r  [$bar] $pct% - Testing $($dns.Name)...                    " -NoNewline -ForegroundColor White
+    $line = "  [$bar] $pct% - Testing $($dns.Name)..."
+    Write-Host "`r$($line.PadRight($progressWidth))" -NoNewline -ForegroundColor White
 
     $results += Get-DnsServerResults -DnsServer $dns -Domains $TestDomains -QueryCount $TestCount
 }
 
-Write-Host "`r  [####################] 100% - Done!                              " -ForegroundColor Green
+$doneLine = "  [####################] 100% - Done!"
+Write-Host "`r$($doneLine.PadRight($progressWidth))" -ForegroundColor Green
 Write-Host ""
 
 # -- Composite Scoring ----------------------------------------------------------
