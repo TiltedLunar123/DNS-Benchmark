@@ -1,6 +1,6 @@
 # DNS Benchmark & Optimizer
 
-A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliability, and security — then applies the best one to your system automatically.
+A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliability, and security - then applies the best one to your system automatically.
 
 [![CI](https://github.com/TiltedLunar123/DNS-Benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/TiltedLunar123/DNS-Benchmark/actions/workflows/ci.yml)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)
@@ -12,10 +12,10 @@ A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliabil
 1. **Detects** your active network adapter and current DNS settings
 2. **Benchmarks** 17 DNS providers across 10 test domains with multiple queries each
 3. **Scores** each provider using a weighted composite:
-   - **Speed** (40%) — average query latency
-   - **Reliability** (25%) — successful resolution rate
-   - **Security** (25%) — DNSSEC, encryption, logging policy, threat blocking
-   - **Consistency** (10%) — low jitter / stable response times
+   - **Speed** (40%) - average query latency
+   - **Reliability** (25%) - successful resolution rate
+   - **Security** (25%) - DNSSEC, encryption, logging policy, threat blocking
+   - **Consistency** (10%) - low jitter / stable response times
 4. **Recommends** the best DNS for your network
 5. **Applies** the winning DNS to your system (with confirmation + backup)
 
@@ -43,7 +43,7 @@ A PowerShell script that benchmarks 17+ public DNS resolvers for speed, reliabil
 
 ## One-Line Install & Run
 
-Paste this into **any PowerShell window** — it auto-elevates to admin, downloads, benchmarks, and applies the best DNS:
+Paste this into **any PowerShell window** - it auto-elevates to admin, downloads, benchmarks, and applies the best DNS:
 
 ```powershell
 irm https://raw.githubusercontent.com/TiltedLunar123/DNS-Benchmark/master/install.ps1 | iex
@@ -104,19 +104,19 @@ Each DNS server gets a **composite score** out of 100:
 Score = (Speed × 0.40) + (Reliability × 0.25) + (Security × 0.25) + (Consistency × 0.10)
 ```
 
-- **Speed** — Normalized average latency across all test queries (lower = better)
-- **Reliability** — Percentage of queries that resolved successfully
-- **Security** — Pre-assigned score based on known features: DNSSEC validation, encryption (DoH/DoT), logging policy, threat blocking, audits
-- **Consistency** — Normalized jitter / standard deviation of response times
+- **Speed** - Normalized average latency across all test queries (lower = better)
+- **Reliability** - Percentage of queries that resolved successfully
+- **Security** - Pre-assigned score based on known features: DNSSEC validation, encryption (DoH/DoT), logging policy, threat blocking, audits
+- **Consistency** - Normalized jitter / standard deviation of response times
 
 Results are displayed with letter grades (A+ through F) and the top 3 are starred.
 
 ## Safety Features
 
-- **Asks before applying** — won't change DNS without your confirmation
-- **Automatic backup** — saves your previous DNS settings to a timestamped file before changing
-- **Easy restore** — run with `-Restore` to go back to DHCP defaults
-- **Admin required** — script won't run without elevated privileges
+- **Asks before applying** - won't change DNS without your confirmation
+- **Automatic backup** - saves your previous DNS settings to a timestamped file before changing
+- **Easy restore** - run with `-Restore` to go back to DHCP defaults
+- **Admin required** - script won't run without elevated privileges
 
 ## Example Output
 
@@ -138,4 +138,4 @@ Results are displayed with letter grades (A+ through F) and the top 3 are starre
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.
