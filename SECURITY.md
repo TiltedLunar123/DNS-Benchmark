@@ -46,6 +46,24 @@ All 17 tested DNS servers are well-known, publicly documented resolvers (Cloudfl
 
 The full list with IPs and security features is visible in the source code and README.
 
+## Installer Integrity
+
+The one-click installer (`install.ps1`) downloads `DNS-Benchmark.ps1` from this
+repository and runs it. Two safeguards protect that step:
+
+- **Single download for elevation.** When the installer needs Administrator
+  rights, it hands the already-loaded script to the elevated process through a
+  local temp file instead of fetching itself a second time. That removes the
+  gap where two separate downloads could return different code.
+- **Checksum verification.** Before running the benchmark script, the installer
+  downloads `checksums.txt` and compares the SHA-256 of the download against the
+  published hash. A mismatch stops the install.
+
+This guards against a corrupted or tampered transfer. It is not a defense
+against a full source compromise, because the checksum is fetched from the same
+repository as the script. For a stronger guarantee, review the source before
+running, or run `DNS-Benchmark.ps1` directly instead of the installer.
+
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability, please report it responsibly:
