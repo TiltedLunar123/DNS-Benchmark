@@ -499,3 +499,54 @@ Describe "Script Parameter Validation" {
         $validateRange | Should -Not -BeNullOrEmpty
     }
 }
+
+# ---------------------------------------------------------------------------
+# Published checksum (#2)
+# ---------------------------------------------------------------------------
+# install.ps1 refuses to run DNS-Benchmark.ps1 unless its hash matches the one
+# in checksums.txt. If the benchmark script changes and the checksum is not
+# refreshed, every install would fail the integrity check. This test fails
+# first so the drift is caught here instead of in the wild.
+Describe "Published checksum" {
+    BeforeAll {
+        $repoRoot = Join-Path $PSScriptRoot ".."
+        $script:benchmarkPath = Join-Path $repoRoot "DNS-Benchmark.ps1"
+        $script:checksumPath = Join-Path $repoRoot "checksums.txt"
+
+        function Get-NormalizedScriptHash {
+            param([string] $Content)
+            $normalized = $Content -replace "`r`n", "`n" -replace "`r", "`n"
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+            } finally {
+                $sha.Dispose()
+            }
+        }
+    }
+
+    It "checksums.txt exists" {
+        Test-Path $script:checksumPath | Should -BeTrue
+    }
+
+    It "lists a SHA-256 entry for DNS-Benchmark.ps1" {
+        $content = Get-Content $script:checksumPath -Raw
+        $content | Should -Match '(?m)^\s*[0-9a-fA-F]{64}\s+\*?DNS-Benchmark\.ps1\s*$'
+    }
+
+    It "matches the current DNS-Benchmark.ps1 hash" {
+        $checksumContent = Get-Content $script:checksumPath -Raw
+        $expected = $null
+        foreach ($line in ($checksumContent -split "`n")) {
+            if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?DNS-Benchmark\.ps1\s*$') {
+                $expected = $Matches[1].ToLowerInvariant()
+                break
+            }
+        }
+        $expected | Should -Not -BeNullOrEmpty
+
+        $actual = Get-NormalizedScriptHash -Content (Get-Content $script:benchmarkPath -Raw)
+        $actual | Should -Be $expected -Because "checksums.txt is stale; regenerate it after editing DNS-Benchmark.ps1"
+    }
+}
