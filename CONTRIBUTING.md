@@ -22,6 +22,12 @@ Thanks for your interest in contributing! Here's how to get started.
 - **No build step** — Edit the `.ps1` file and run it directly.
 - **Admin required** — The script changes DNS settings via `Set-DnsClientServerAddress`, which requires elevation. Use `-SkipApply` for safe benchmarking during development.
 - **PowerShell 5.1+** — Must work on the version pre-installed with Windows 10/11. Avoid PS 7-only syntax.
+- **Refresh the checksum after editing the benchmark** — `install.ps1` verifies `DNS-Benchmark.ps1` against the hash in `checksums.txt`. If you change the benchmark script, regenerate it or the installer (and the test suite) will reject the mismatch:
+  ```powershell
+  $c = [System.IO.File]::ReadAllText("DNS-Benchmark.ps1") -replace "`r`n","`n" -replace "`r","`n"
+  $h = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($c))).Replace("-","").ToLower()
+  Set-Content checksums.txt "$h  DNS-Benchmark.ps1" -NoNewline -Encoding utf8
+  ```
 
 ## Testing
 
