@@ -487,6 +487,75 @@ Describe "Set-OptimalDns" {
 }
 
 # ---------------------------------------------------------------------------
+# Test-NetworkConnectivity (#14 - pre-flight connectivity check)
+# ---------------------------------------------------------------------------
+Describe "Test-NetworkConnectivity" {
+    Context "When at least one anchor answers" {
+        BeforeAll {
+            Mock Resolve-DnsName { }
+        }
+
+        It "Should report Online when every probe succeeds" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8")
+            $result.Online | Should -BeTrue
+        }
+
+        It "Should list every reachable server" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8")
+            $result.ReachableServers | Should -Contain "1.1.1.1"
+            $result.ReachableServers | Should -Contain "8.8.8.8"
+        }
+
+        It "Should echo back the servers it probed" {
+            $result = Test-NetworkConnectivity -AnchorServers @("9.9.9.9")
+            $result.ProbedServers | Should -Be @("9.9.9.9")
+        }
+    }
+
+    Context "When no anchor answers" {
+        BeforeAll {
+            Mock Resolve-DnsName { throw "no route to host" }
+        }
+
+        It "Should report offline" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8", "9.9.9.9")
+            $result.Online | Should -BeFalse
+        }
+
+        It "Should return an empty reachable list" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8")
+            $result.ReachableServers | Should -BeNullOrEmpty
+        }
+    }
+
+    Context "When only some anchors answer" {
+        BeforeAll {
+            Mock Resolve-DnsName { } -ParameterFilter { $Server -eq "8.8.8.8" }
+            Mock Resolve-DnsName { throw "timeout" } -ParameterFilter { $Server -ne "8.8.8.8" }
+        }
+
+        It "Should still report Online" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8", "9.9.9.9")
+            $result.Online | Should -BeTrue
+        }
+
+        It "Should list only the anchor that answered" {
+            $result = Test-NetworkConnectivity -AnchorServers @("1.1.1.1", "8.8.8.8", "9.9.9.9")
+            $result.ReachableServers | Should -Be @("8.8.8.8")
+        }
+    }
+
+    Context "Defaults" {
+        It "Should default to three public anchor resolvers" {
+            Mock Resolve-DnsName { }
+            $result = Test-NetworkConnectivity
+            $result.ProbedServers.Count | Should -Be 3
+            $result.ProbedServers | Should -Contain "1.1.1.1"
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Parameter validation
 # ---------------------------------------------------------------------------
 Describe "Script Parameter Validation" {

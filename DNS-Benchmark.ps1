@@ -298,6 +298,48 @@ function Set-OptimalDns {
     ($newDns[0] -eq $PrimaryDns) -and ($newDns.Count -ge 2 -and $newDns[1] -eq $SecondaryDns)
 }
 
+function Test-NetworkConnectivity {
+    <#
+    .SYNOPSIS
+        Pre-flight check that confirms DNS can actually leave this machine
+        before a full benchmark is attempted (#14).
+    .DESCRIPTION
+        With no network, every server in the table fails identically, the tool
+        still crowns a "winner" from those uniformly-broken results, and it then
+        offers to apply DNS that was never really reached. This probes a small
+        set of well-known anchor resolvers and reports whether at least one
+        answered, so the caller can bail out with a clear message instead.
+    .PARAMETER AnchorServers
+        IPv4 addresses of reliable public resolvers to probe.
+    .PARAMETER ProbeDomain
+        Domain to resolve during the probe.
+    #>
+    param(
+        [string[]]$AnchorServers = @("1.1.1.1", "8.8.8.8", "9.9.9.9"),
+        [string]$ProbeDomain = "google.com"
+    )
+
+    $reachable = @()
+    foreach ($server in $AnchorServers) {
+        try {
+            # -QuickTimeout keeps a fully offline probe from stalling on each
+            # anchor; one answer is enough to prove DNS egress works.
+            $null = Resolve-DnsName -Name $ProbeDomain -Server $server -DnsOnly -Type A -QuickTimeout -ErrorAction Stop
+            $reachable += $server
+        }
+        catch {
+            # A throw here is expected when offline; keep probing the rest.
+            Write-Verbose "Connectivity probe to $server failed: $_"
+        }
+    }
+
+    [PSCustomObject]@{
+        Online           = ($reachable.Count -gt 0)
+        ReachableServers = $reachable
+        ProbedServers    = $AnchorServers
+    }
+}
+
 # -- Banner ---------------------------------------------------------------------
 Write-Host ""
 Write-Host "   ____  _   _ ____  " -ForegroundColor Cyan
@@ -382,6 +424,18 @@ $currentDns = (Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceInde
 Write-Success "Active adapter: $($adapter.Name) ($($adapter.InterfaceDescription))"
 Write-Info    "Current DNS:    $($currentDns -join ', ')"
 Write-Info    "Link speed:     $($adapter.LinkSpeed)"
+
+# -- Pre-flight connectivity check ---------------------------------------------
+# Bail out before the benchmark if DNS cannot leave the machine. Otherwise every
+# server fails the same way and the tool crowns a meaningless "winner" (#14).
+Write-Status "Checking DNS connectivity..."
+$connectivity = Test-NetworkConnectivity
+if (-not $connectivity.Online) {
+    Write-Err "No DNS connectivity. Probed $($connectivity.ProbedServers -join ', ') and none answered."
+    Write-Info "Check your network connection and try again."
+    exit 1
+}
+Write-Success "Connectivity OK (reached $($connectivity.ReachableServers -join ', '))"
 
 # -- Benchmark ------------------------------------------------------------------
 Write-Header "Benchmarking $($DnsServers.Count) DNS Servers"
