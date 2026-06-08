@@ -13,8 +13,9 @@ All notable changes to DNS Benchmark & Optimizer are documented here.
 - Progress bar lines are padded to a fixed width derived from the longest server name, so the previous server name no longer leaks through when shorter names follow (#11).
 
 ### Added
+- Pre-flight connectivity check before benchmarking. `Test-NetworkConnectivity` probes a small set of anchor resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9) and the script now exits with a clear message when none answer, instead of ranking a table of uniformly-failed servers and offering to apply a "winner" that was never reached (#14).
 - `-MaxBackups` parameter on `Backup-DnsSettings` (default 10) prunes older `dns-backup_*.json` files after each new write so they no longer accumulate forever (#7).
-- Pester coverage for `Set-OptimalDns` (success plus two failure paths), the backup file extension, the new retention behavior, and `Test-StaticDnsConfigured`.
+- Pester coverage for `Set-OptimalDns` (success plus two failure paths), the backup file extension, the new retention behavior, `Test-StaticDnsConfigured`, and the new connectivity probe (online, offline, and partial-reachability cases).
 
 ## [1.1.0] — 2026-04-11
 

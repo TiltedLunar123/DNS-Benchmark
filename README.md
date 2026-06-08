@@ -113,6 +113,7 @@ Results are displayed with letter grades (A+ through F) and the top 3 are starre
 
 ## Safety Features
 
+- **Pre-flight connectivity check** - probes a few public resolvers before benchmarking, so an offline machine gets a clear message instead of a ranking built from failed queries
 - **Asks before applying** - won't change DNS without your confirmation
 - **Automatic backup** - saves your previous DNS settings to a timestamped file before changing
 - **Easy restore** - run with `-Restore` to go back to DHCP defaults
