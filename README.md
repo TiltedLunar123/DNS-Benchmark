@@ -80,6 +80,9 @@ The script will benchmark all DNS servers and ask before applying any changes.
 # Export results to CSV
 .\DNS-Benchmark.ps1 -Report
 
+# Also set the winner's IPv6 DNS (dual-stack networks)
+.\DNS-Benchmark.ps1 -IncludeIPv6
+
 # Combine flags
 .\DNS-Benchmark.ps1 -TestCount 10 -Report -SkipApply
 
@@ -95,6 +98,20 @@ The script will benchmark all DNS servers and ask before applying any changes.
 | `-SkipApply` | switch | false | Benchmark only, don't apply changes |
 | `-Restore` | switch | false | Reset DNS to DHCP/automatic |
 | `-Report` | switch | false | Export results to CSV |
+| `-IncludeIPv6` | switch | false | Also apply the winner's IPv6 DNS (see below) |
+
+## IPv6 (Dual-Stack Networks)
+
+By default the script only touches IPv4 DNS. On a dual-stack network that
+leaves a gap: the machine can still resolve over whatever IPv6 DNS the router
+handed out, quietly bypassing the resolver you just picked.
+
+Run with `-IncludeIPv6` to also set the winning provider's IPv6 addresses.
+It only does so when the adapter actually has IPv6 bound and the chosen
+resolver publishes IPv6 anycast (most in the list do; a few are IPv4-only and
+are applied as IPv4 only). The previous IPv6 servers are saved in the same
+backup, and `-Restore` clears both families. It stays off by default so an
+IPv6 configuration is never changed unless you ask for it.
 
 ## How Scoring Works
 
