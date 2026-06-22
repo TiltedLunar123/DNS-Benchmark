@@ -358,6 +358,19 @@ Describe "Backup-DnsSettings" {
         $content.PreviousDNS | Should -Be "1.1.1.1"
     }
 
+    It "Should record the previous IPv6 servers when supplied (#8)" {
+        $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 7 `
+            -CurrentDns @("1.1.1.1", "1.0.0.1") -CurrentDnsV6 @("2606:4700:4700::1111", "2606:4700:4700::1001")
+        $content = Get-Content $path -Raw | ConvertFrom-Json
+        $content.PreviousDNSv6 | Should -Be "2606:4700:4700::1111,2606:4700:4700::1001"
+    }
+
+    It "Should leave the IPv6 field empty when no IPv6 servers are given" {
+        $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 7 -CurrentDns @("1.1.1.1")
+        $content = Get-Content $path -Raw | ConvertFrom-Json
+        $content.PreviousDNSv6 | Should -Be ""
+    }
+
     It "Should include an ISO 8601 timestamp" {
         $path = Backup-DnsSettings -BackupDir $testDir -AdapterName "Wi-Fi" -InterfaceIndex 1 -CurrentDns @("9.9.9.9")
         $raw = Get-Content $path -Raw
@@ -483,6 +496,127 @@ Describe "Set-OptimalDns" {
 
         $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1"
         $result | Should -Be $true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Set-OptimalDns - IPv6 path (#8)
+# ---------------------------------------------------------------------------
+Describe "Set-OptimalDns (IPv6)" {
+    BeforeEach {
+        Mock Set-DnsClientServerAddress { }
+        Mock Clear-DnsClientCache { }
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @("1.1.1.1", "1.0.0.1") }
+        } -ParameterFilter { $AddressFamily -eq "IPv4" }
+    }
+
+    It "Should return `$true when both IPv4 and IPv6 families apply correctly" {
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @("2606:4700:4700::1111", "2606:4700:4700::1001") }
+        } -ParameterFilter { $AddressFamily -eq "IPv6" }
+
+        $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+            -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001"
+        $result | Should -Be $true
+    }
+
+    It "Should pass all four addresses to Set-DnsClientServerAddress in one call" {
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @("2606:4700:4700::1111", "2606:4700:4700::1001") }
+        } -ParameterFilter { $AddressFamily -eq "IPv6" }
+
+        Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+            -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" | Out-Null
+
+        Should -Invoke Set-DnsClientServerAddress -Times 1 -Exactly -ParameterFilter {
+            $ServerAddresses.Count -eq 4 -and
+            $ServerAddresses -contains "2606:4700:4700::1111" -and
+            $ServerAddresses -contains "1.1.1.1"
+        }
+    }
+
+    It "Should return `$false when the IPv6 family does not take" {
+        Mock Get-DnsClientServerAddress {
+            [PSCustomObject]@{ ServerAddresses = @() }
+        } -ParameterFilter { $AddressFamily -eq "IPv6" }
+
+        $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+            -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001"
+        $result | Should -Be $false
+    }
+
+    It "Should ignore IPv6 and stay IPv4-only when only one v6 address is given" {
+        # No IPv6 read should happen; if the function tried, this mock would make it fail.
+        Mock Get-DnsClientServerAddress { throw "IPv6 read should not be reached" } -ParameterFilter { $AddressFamily -eq "IPv6" }
+
+        $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+            -PrimaryDnsV6 "2606:4700:4700::1111"
+        $result | Should -Be $true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Test-IPv6Available (#8)
+# ---------------------------------------------------------------------------
+Describe "Test-IPv6Available" {
+    It "Should return `$true when ms_tcpip6 is bound and enabled" {
+        Mock Get-NetAdapterBinding { [PSCustomObject]@{ ComponentID = "ms_tcpip6"; Enabled = $true } }
+        Test-IPv6Available -AdapterName "Wi-Fi" | Should -Be $true
+    }
+
+    It "Should return `$false when ms_tcpip6 is bound but disabled" {
+        Mock Get-NetAdapterBinding { [PSCustomObject]@{ ComponentID = "ms_tcpip6"; Enabled = $false } }
+        Test-IPv6Available -AdapterName "Wi-Fi" | Should -Be $false
+    }
+
+    It "Should fail-safe to `$false when the binding cannot be read" {
+        Mock Get-NetAdapterBinding { throw "adapter not found" }
+        Test-IPv6Available -AdapterName "Ghost" | Should -Be $false
+    }
+}
+
+# ---------------------------------------------------------------------------
+# IPv6 resolver data (#8)
+# ---------------------------------------------------------------------------
+Describe "IPv6 resolver data" {
+    BeforeAll {
+        $dataScriptPath = Join-Path (Join-Path $PSScriptRoot "..") "DNS-Benchmark.ps1"
+        $dataContent = Get-Content $dataScriptPath -Raw
+        $dataAst = [System.Management.Automation.Language.Parser]::ParseInput($dataContent, [ref]$null, [ref]$null)
+        $assign = $dataAst.FindAll({
+            $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $args[0].Left.Extent.Text -eq '$DnsServers'
+        }, $true) | Select-Object -First 1
+        $script:DnsServers = Invoke-Expression $assign.Right.Extent.Text
+    }
+
+    It "Should define a non-empty resolver table" {
+        $script:DnsServers.Count | Should -BeGreaterThan 0
+    }
+
+    It "Should pair every IPv6 primary with an IPv6 secondary" {
+        foreach ($s in $script:DnsServers) {
+            $hasPrimary   = -not [string]::IsNullOrWhiteSpace($s.PrimaryV6)
+            $hasSecondary = -not [string]::IsNullOrWhiteSpace($s.SecondaryV6)
+            $hasPrimary | Should -Be $hasSecondary -Because "$($s.Name) must list both IPv6 addresses or neither"
+        }
+    }
+
+    It "Should only use real IPv6 literals for the v6 addresses" {
+        foreach ($s in $script:DnsServers) {
+            if (-not [string]::IsNullOrWhiteSpace($s.PrimaryV6)) {
+                ([System.Net.IPAddress]::Parse($s.PrimaryV6)).AddressFamily |
+                    Should -Be ([System.Net.Sockets.AddressFamily]::InterNetworkV6) -Because "$($s.Name) PrimaryV6"
+                ([System.Net.IPAddress]::Parse($s.SecondaryV6)).AddressFamily |
+                    Should -Be ([System.Net.Sockets.AddressFamily]::InterNetworkV6) -Because "$($s.Name) SecondaryV6"
+            }
+        }
+    }
+
+    It "Should carry IPv6 for the headline resolvers" {
+        ($script:DnsServers | Where-Object { $_.Name -eq "Cloudflare" }).PrimaryV6 | Should -Be "2606:4700:4700::1111"
+        ($script:DnsServers | Where-Object { $_.Name -eq "Google" }).PrimaryV6     | Should -Be "2001:4860:4860::8888"
     }
 }
 
