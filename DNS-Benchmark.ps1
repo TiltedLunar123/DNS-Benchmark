@@ -18,10 +18,17 @@
 .PARAMETER Report
     Export results to a CSV file.
 
+.PARAMETER IncludeIPv6
+    Also apply the winning resolver's IPv6 DNS addresses alongside IPv4, when the
+    adapter has IPv6 bound and the resolver publishes IPv6. Off by default so an
+    IPv6 config is never changed unless asked for. Without it, a dual-stack box
+    can still resolve over whatever IPv6 DNS the router handed out.
+
 .EXAMPLE
     .\DNS-Benchmark.ps1
     .\DNS-Benchmark.ps1 -TestCount 10 -Report
     .\DNS-Benchmark.ps1 -SkipApply
+    .\DNS-Benchmark.ps1 -IncludeIPv6
     .\DNS-Benchmark.ps1 -Restore
 #>
 
@@ -31,7 +38,8 @@ param(
     [int]$TestCount = 5,
     [switch]$SkipApply,
     [switch]$Restore,
-    [switch]$Report
+    [switch]$Report,
+    [switch]$IncludeIPv6
 )
 
 # -- Admin check --------------------------------------------------------------------------
@@ -221,6 +229,8 @@ function Backup-DnsSettings {
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
         [string[]]$CurrentDns,
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDnsV6 = @(),
         [ValidateRange(1, 1000)]
         [int]$MaxBackups = 10
     )
@@ -229,10 +239,11 @@ function Backup-DnsSettings {
 
     $backupPath = Join-Path $BackupDir "dns-backup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
     @{
-        Adapter      = $AdapterName
-        InterfaceIdx = $InterfaceIndex
-        PreviousDNS  = $CurrentDns -join ","
-        Timestamp    = (Get-Date).ToString("o")
+        Adapter       = $AdapterName
+        InterfaceIdx  = $InterfaceIndex
+        PreviousDNS   = $CurrentDns -join ","
+        PreviousDNSv6 = $CurrentDnsV6 -join ","
+        Timestamp     = (Get-Date).ToString("o")
     } | ConvertTo-Json | Out-File -FilePath $backupPath -Encoding UTF8
 
     $existing = @(Get-ChildItem -Path $BackupDir -Filter "dns-backup_*.json" -File -ErrorAction SilentlyContinue |
@@ -272,6 +283,11 @@ function Set-OptimalDns {
     <#
     .SYNOPSIS
         Applies DNS servers to a network adapter and flushes the DNS cache.
+    .DESCRIPTION
+        Always sets the IPv4 pair. When both IPv6 addresses are supplied they are
+        sent in the same Set-DnsClientServerAddress call (Windows routes each
+        address to its own family) and the IPv6 family is verified too, so a
+        partial apply is reported as a failure (#8).
     #>
     param(
         [Parameter(Mandatory)]
@@ -279,11 +295,19 @@ function Set-OptimalDns {
         [Parameter(Mandatory)]
         [string]$PrimaryDns,
         [Parameter(Mandatory)]
-        [string]$SecondaryDns
+        [string]$SecondaryDns,
+        [string]$PrimaryDnsV6 = "",
+        [string]$SecondaryDnsV6 = ""
     )
 
+    $applyV6 = -not [string]::IsNullOrWhiteSpace($PrimaryDnsV6) -and
+               -not [string]::IsNullOrWhiteSpace($SecondaryDnsV6)
+
+    $addresses = @($PrimaryDns, $SecondaryDns)
+    if ($applyV6) { $addresses += @($PrimaryDnsV6, $SecondaryDnsV6) }
+
     try {
-        Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses @($PrimaryDns, $SecondaryDns) -ErrorAction Stop
+        Set-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -ServerAddresses $addresses -ErrorAction Stop
     } catch {
         return $false
     }
@@ -295,7 +319,19 @@ function Set-OptimalDns {
         return $false
     }
     if (-not $newDns -or $newDns.Count -eq 0) { return $false }
-    ($newDns[0] -eq $PrimaryDns) -and ($newDns.Count -ge 2 -and $newDns[1] -eq $SecondaryDns)
+    $ipv4Ok = ($newDns[0] -eq $PrimaryDns) -and ($newDns.Count -ge 2 -and $newDns[1] -eq $SecondaryDns)
+
+    if (-not $applyV6) { return $ipv4Ok }
+
+    try {
+        $newDns6 = (Get-DnsClientServerAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses
+    } catch {
+        return $false
+    }
+    if (-not $newDns6 -or $newDns6.Count -eq 0) { return $false }
+    $ipv6Ok = ($newDns6[0] -eq $PrimaryDnsV6) -and ($newDns6.Count -ge 2 -and $newDns6[1] -eq $SecondaryDnsV6)
+
+    $ipv4Ok -and $ipv6Ok
 }
 
 function Test-NetworkConnectivity {
@@ -340,6 +376,29 @@ function Test-NetworkConnectivity {
     }
 }
 
+function Test-IPv6Available {
+    <#
+    .SYNOPSIS
+        Returns $true when the adapter has the IPv6 stack bound, $false otherwise.
+    .DESCRIPTION
+        Setting IPv6 DNS on an adapter whose IPv6 (ms_tcpip6) binding is disabled
+        throws. This checks the binding first so the caller can fall back to an
+        IPv4-only apply cleanly. Fail-safe to $false: if the binding cannot be
+        read, IPv6 is treated as unavailable and only IPv4 is applied (#8).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$AdapterName
+    )
+
+    try {
+        $binding = Get-NetAdapterBinding -Name $AdapterName -ComponentID 'ms_tcpip6' -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    [bool]($binding -and $binding.Enabled)
+}
+
 # -- Banner ---------------------------------------------------------------------
 Write-Host ""
 Write-Host "   ____  _   _ ____  " -ForegroundColor Cyan
@@ -351,25 +410,28 @@ Write-Host "  Benchmark and Optimizer" -ForegroundColor White
 Write-Host ""
 
 # -- DNS Server Database --------------------------------------------------------
-# Each entry: Name, Primary IPv4, Secondary IPv4, Security Score (0-100)
+# Each entry: Name, Primary IPv4, Secondary IPv4, Security Score (0-100), Features,
+# and optional PrimaryV6/SecondaryV6 anycast addresses for providers that publish
+# them. IPv6 is only applied when -IncludeIPv6 is set (see Set-OptimalDns). Entries
+# without published, stable IPv6 anycast are intentionally left IPv4-only.
 # Security scoring based on: DNSSEC validation, no-logging policy, malware blocking,
 # DNS-over-HTTPS support, DNS-over-TLS support, open-source/audited
 $DnsServers = @(
-    @{ Name = "Cloudflare";              Primary = "1.1.1.1";       Secondary = "1.0.0.1";       SecurityScore = 92;  Features = "DNSSEC, DoH, DoT, no-log policy, audited privacy" }
-    @{ Name = "Cloudflare (Malware)";    Primary = "1.1.1.2";       Secondary = "1.0.0.2";       SecurityScore = 95;  Features = "DNSSEC, DoH, DoT, malware blocking, no-log" }
-    @{ Name = "Cloudflare (Family)";     Primary = "1.1.1.3";       Secondary = "1.0.0.3";       SecurityScore = 95;  Features = "DNSSEC, DoH, DoT, malware + adult blocking" }
-    @{ Name = "Google";                  Primary = "8.8.8.8";       Secondary = "8.8.4.4";       SecurityScore = 78;  Features = "DNSSEC, DoH, DoT, logs anonymized after 48h" }
-    @{ Name = "Quad9";                   Primary = "9.9.9.9";       Secondary = "149.112.112.112"; SecurityScore = 96; Features = "DNSSEC, DoH, DoT, threat blocking, non-profit, no-log" }
-    @{ Name = "Quad9 (Unfiltered)";      Primary = "9.9.9.10";      Secondary = "149.112.112.10"; SecurityScore = 88;  Features = "DNSSEC, DoH, DoT, no filtering, no-log" }
-    @{ Name = "OpenDNS";                 Primary = "208.67.222.222"; Secondary = "208.67.220.220"; SecurityScore = 80;  Features = "DNSSEC, DoH, phishing protection, Cisco-owned" }
+    @{ Name = "Cloudflare";              Primary = "1.1.1.1";       Secondary = "1.0.0.1";       PrimaryV6 = "2606:4700:4700::1111"; SecondaryV6 = "2606:4700:4700::1001"; SecurityScore = 92;  Features = "DNSSEC, DoH, DoT, no-log policy, audited privacy" }
+    @{ Name = "Cloudflare (Malware)";    Primary = "1.1.1.2";       Secondary = "1.0.0.2";       PrimaryV6 = "2606:4700:4700::1112"; SecondaryV6 = "2606:4700:4700::1002"; SecurityScore = 95;  Features = "DNSSEC, DoH, DoT, malware blocking, no-log" }
+    @{ Name = "Cloudflare (Family)";     Primary = "1.1.1.3";       Secondary = "1.0.0.3";       PrimaryV6 = "2606:4700:4700::1113"; SecondaryV6 = "2606:4700:4700::1003"; SecurityScore = 95;  Features = "DNSSEC, DoH, DoT, malware + adult blocking" }
+    @{ Name = "Google";                  Primary = "8.8.8.8";       Secondary = "8.8.4.4";       PrimaryV6 = "2001:4860:4860::8888"; SecondaryV6 = "2001:4860:4860::8844"; SecurityScore = 78;  Features = "DNSSEC, DoH, DoT, logs anonymized after 48h" }
+    @{ Name = "Quad9";                   Primary = "9.9.9.9";       Secondary = "149.112.112.112"; PrimaryV6 = "2620:fe::fe"; SecondaryV6 = "2620:fe::9"; SecurityScore = 96; Features = "DNSSEC, DoH, DoT, threat blocking, non-profit, no-log" }
+    @{ Name = "Quad9 (Unfiltered)";      Primary = "9.9.9.10";      Secondary = "149.112.112.10"; PrimaryV6 = "2620:fe::10"; SecondaryV6 = "2620:fe::fe:10"; SecurityScore = 88;  Features = "DNSSEC, DoH, DoT, no filtering, no-log" }
+    @{ Name = "OpenDNS";                 Primary = "208.67.222.222"; Secondary = "208.67.220.220"; PrimaryV6 = "2620:119:35::35"; SecondaryV6 = "2620:119:53::53"; SecurityScore = 80;  Features = "DNSSEC, DoH, phishing protection, Cisco-owned" }
     @{ Name = "OpenDNS (FamilyShield)";  Primary = "208.67.222.123"; Secondary = "208.67.220.123"; SecurityScore = 82; Features = "DNSSEC, DoH, family filter, phishing protection" }
-    @{ Name = "AdGuard";                 Primary = "94.140.14.14";  Secondary = "94.140.15.15";  SecurityScore = 90;  Features = "DNSSEC, DoH, DoT, ad/tracker/malware blocking" }
-    @{ Name = "AdGuard (Family)";        Primary = "94.140.14.15";  Secondary = "94.140.15.16";  SecurityScore = 91;  Features = "DNSSEC, DoH, DoT, family filter + ad blocking" }
+    @{ Name = "AdGuard";                 Primary = "94.140.14.14";  Secondary = "94.140.15.15";  PrimaryV6 = "2a10:50c0::ad1:ff"; SecondaryV6 = "2a10:50c0::ad2:ff"; SecurityScore = 90;  Features = "DNSSEC, DoH, DoT, ad/tracker/malware blocking" }
+    @{ Name = "AdGuard (Family)";        Primary = "94.140.14.15";  Secondary = "94.140.15.16";  PrimaryV6 = "2a10:50c0::bad1:ff"; SecondaryV6 = "2a10:50c0::bad2:ff"; SecurityScore = 91;  Features = "DNSSEC, DoH, DoT, family filter + ad blocking" }
     @{ Name = "Comodo Secure";           Primary = "8.26.56.26";    Secondary = "8.20.247.20";   SecurityScore = 72;  Features = "Malware blocking, phishing protection" }
-    @{ Name = "CleanBrowsing (Security)";Primary = "185.228.168.9"; Secondary = "185.228.169.9"; SecurityScore = 88;  Features = "DNSSEC, DoH, DoT, malware/phishing blocking" }
-    @{ Name = "CleanBrowsing (Family)";  Primary = "185.228.168.168"; Secondary = "185.228.169.168"; SecurityScore = 89; Features = "DNSSEC, DoH, DoT, family + security filter" }
-    @{ Name = "Mullvad";                 Primary = "194.242.2.2";   Secondary = "194.242.2.3";   SecurityScore = 94;  Features = "DNSSEC, DoH, DoT, no-log, privacy-focused VPN company" }
-    @{ Name = "Control D";              Primary = "76.76.2.0";     Secondary = "76.76.10.0";    SecurityScore = 86;  Features = "DNSSEC, DoH, DoT, customizable filtering" }
+    @{ Name = "CleanBrowsing (Security)";Primary = "185.228.168.9"; Secondary = "185.228.169.9"; PrimaryV6 = "2a0d:2a00:1::"; SecondaryV6 = "2a0d:2a00:2::"; SecurityScore = 88;  Features = "DNSSEC, DoH, DoT, malware/phishing blocking" }
+    @{ Name = "CleanBrowsing (Family)";  Primary = "185.228.168.168"; Secondary = "185.228.169.168"; PrimaryV6 = "2a0d:2a00:1::1"; SecondaryV6 = "2a0d:2a00:2::1"; SecurityScore = 89; Features = "DNSSEC, DoH, DoT, family + security filter" }
+    @{ Name = "Mullvad";                 Primary = "194.242.2.2";   Secondary = "194.242.2.3";   PrimaryV6 = "2a07:e340::2"; SecondaryV6 = "2a07:e340::3"; SecurityScore = 94;  Features = "DNSSEC, DoH, DoT, no-log, privacy-focused VPN company" }
+    @{ Name = "Control D";              Primary = "76.76.2.0";     Secondary = "76.76.10.0";    PrimaryV6 = "2606:1a40::"; SecondaryV6 = "2606:1a40:1::"; SecurityScore = 86;  Features = "DNSSEC, DoH, DoT, customizable filtering" }
     @{ Name = "Neustar UltraDNS";       Primary = "64.6.64.6";     Secondary = "64.6.65.6";     SecurityScore = 70;  Features = "DNSSEC, enterprise-grade reliability" }
     @{ Name = "Level3 / CenturyLink";   Primary = "4.2.2.1";       Secondary = "4.2.2.2";       SecurityScore = 55;  Features = "Basic DNS, no encryption, no filtering" }
 )
@@ -532,6 +594,24 @@ if (-not $SkipApply) {
     Write-Host ""
     Write-Header "Apply DNS Settings"
 
+    # Decide whether IPv6 is in play: the opt-in switch is set, the winning
+    # resolver publishes IPv6 anycast, and the adapter actually has IPv6 bound.
+    # Any of those missing and we apply IPv4 only, exactly as before (#8).
+    $winnerV6Primary   = if ($winner.PrimaryV6)   { [string]$winner.PrimaryV6 }   else { "" }
+    $winnerV6Secondary = if ($winner.SecondaryV6) { [string]$winner.SecondaryV6 } else { "" }
+    $applyV6 = $IncludeIPv6 -and
+               -not [string]::IsNullOrWhiteSpace($winnerV6Primary) -and
+               -not [string]::IsNullOrWhiteSpace($winnerV6Secondary) -and
+               (Test-IPv6Available -AdapterName $adapter.Name)
+
+    if ($IncludeIPv6 -and -not $applyV6) {
+        if ([string]::IsNullOrWhiteSpace($winnerV6Primary)) {
+            Write-Info "-IncludeIPv6 set, but $($winner.Name) has no IPv6 address on file. Applying IPv4 only."
+        } else {
+            Write-Info "-IncludeIPv6 set, but this adapter has no IPv6 bound. Applying IPv4 only."
+        }
+    }
+
     # Check if already using the winner
     if ($currentDns -and $currentDns[0] -eq $winner.Primary) {
         Write-Success "You're already using the best DNS ($($winner.Name)). No changes needed!"
@@ -541,19 +621,37 @@ if (-not $SkipApply) {
     Write-Status "This will change DNS on '$($adapter.Name)' to:"
     Write-Host "         Primary:   $($winner.Primary)" -ForegroundColor White
     Write-Host "         Secondary: $($winner.Secondary)" -ForegroundColor White
+    if ($applyV6) {
+        Write-Host "         IPv6 Pri:  $winnerV6Primary" -ForegroundColor White
+        Write-Host "         IPv6 Sec:  $winnerV6Secondary" -ForegroundColor White
+    }
     Write-Host ""
 
     $confirm = Read-Host "  Apply these settings? (Y/n)"
     if ($confirm -match "^[Yy]?$") {
         try {
-            $backupPath = Backup-DnsSettings -BackupDir $ScriptDir -AdapterName $adapter.Name -InterfaceIndex $adapter.InterfaceIndex -CurrentDns $currentDns
+            $currentDnsV6 = @()
+            if ($applyV6) {
+                try {
+                    $currentDnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses)
+                } catch {
+                    $currentDnsV6 = @()
+                }
+            }
+
+            $backupPath = Backup-DnsSettings -BackupDir $ScriptDir -AdapterName $adapter.Name -InterfaceIndex $adapter.InterfaceIndex -CurrentDns $currentDns -CurrentDnsV6 $currentDnsV6
             Write-Info "Backup saved: $backupPath"
 
-            $applied = Set-OptimalDns -InterfaceIndex $adapter.InterfaceIndex -PrimaryDns $winner.Primary -SecondaryDns $winner.Secondary
+            $applied = if ($applyV6) {
+                Set-OptimalDns -InterfaceIndex $adapter.InterfaceIndex -PrimaryDns $winner.Primary -SecondaryDns $winner.Secondary -PrimaryDnsV6 $winnerV6Primary -SecondaryDnsV6 $winnerV6Secondary
+            } else {
+                Set-OptimalDns -InterfaceIndex $adapter.InterfaceIndex -PrimaryDns $winner.Primary -SecondaryDns $winner.Secondary
+            }
 
             if ($applied) {
                 Write-Host ""
                 Write-Success "DNS changed to $($winner.Name) ($($winner.Primary), $($winner.Secondary))"
+                if ($applyV6) { Write-Success "IPv6 DNS set ($winnerV6Primary, $winnerV6Secondary)" }
                 Write-Success "DNS cache flushed"
                 Write-Info    "Previous DNS backed up to: $backupPath"
                 Write-Info    "To restore: .\DNS-Benchmark.ps1 -Restore"
