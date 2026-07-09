@@ -690,14 +690,106 @@ Describe "Test-NetworkConnectivity" {
 }
 
 # ---------------------------------------------------------------------------
+# Test-ParallelSupported (#12 - parallel benchmarking gate)
+# ---------------------------------------------------------------------------
+Describe "Test-ParallelSupported" {
+    It "Should return `$true on PowerShell 7.0 and later" {
+        Test-ParallelSupported -PSVersion ([version]"7.0.0") | Should -BeTrue
+        Test-ParallelSupported -PSVersion ([version]"7.6.3") | Should -BeTrue
+    }
+
+    It "Should return `$false on Windows PowerShell 5.1" {
+        Test-ParallelSupported -PSVersion ([version]"5.1.19041.0") | Should -BeFalse
+    }
+
+    It "Should return `$true on a future major version" {
+        Test-ParallelSupported -PSVersion ([version]"8.2.0") | Should -BeTrue
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Invoke-ParallelBenchmark (#12)
+# ---------------------------------------------------------------------------
+# Pester mocks do not cross into ForEach-Object -Parallel threads, so the worker
+# is injected as source text. Here we inject a stand-in for Get-DnsServerResults
+# that does no network I/O, which exercises the real parallel fan-out offline.
+Describe "Invoke-ParallelBenchmark" {
+    BeforeAll {
+        $script:stubDef = @'
+param(
+    [Parameter(Mandatory)][hashtable]$DnsServer,
+    [Parameter(Mandatory)][string[]]$Domains,
+    [Parameter(Mandatory)][int]$QueryCount
+)
+[PSCustomObject]@{
+    Name        = $DnsServer.Name
+    QueryCount  = $QueryCount
+    FirstDomain = $Domains[0]
+    DomainCount = $Domains.Count
+}
+'@
+        $script:servers = @(
+            @{ Name = "Alpha" }
+            @{ Name = "Bravo" }
+            @{ Name = "Charlie" }
+            @{ Name = "Delta" }
+            @{ Name = "Echo" }
+        )
+    }
+
+    It "Should return one result per server" {
+        $out = @(Invoke-ParallelBenchmark -DnsServers $script:servers -Domains @("a.com") `
+            -QueryCount 3 -GetResultsDef $script:stubDef -ThrottleLimit 3)
+        $out.Count | Should -Be 5
+    }
+
+    It "Should benchmark every server exactly once (order-independent)" {
+        $out = @(Invoke-ParallelBenchmark -DnsServers $script:servers -Domains @("a.com") `
+            -QueryCount 3 -GetResultsDef $script:stubDef -ThrottleLimit 2)
+        ($out.Name | Sort-Object) | Should -Be @("Alpha", "Bravo", "Charlie", "Delta", "Echo")
+    }
+
+    It "Should pass QueryCount and Domains through to the worker" {
+        $out = @(Invoke-ParallelBenchmark -DnsServers @(@{ Name = "Solo" }) `
+            -Domains @("first.com", "second.com") -QueryCount 9 -GetResultsDef $script:stubDef -ThrottleLimit 1)
+        $out.Count | Should -Be 1
+        $out[0].QueryCount  | Should -Be 9
+        $out[0].FirstDomain | Should -Be "first.com"
+        $out[0].DomainCount | Should -Be 2
+    }
+
+    It "Should still process every server with a throttle limit of 1" {
+        $out = @(Invoke-ParallelBenchmark -DnsServers $script:servers -Domains @("a.com") `
+            -QueryCount 1 -GetResultsDef $script:stubDef -ThrottleLimit 1)
+        $out.Count | Should -Be 5
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Parameter validation
 # ---------------------------------------------------------------------------
 Describe "Script Parameter Validation" {
-    It "Should define TestCount with ValidateRange(1, 100)" {
+    BeforeAll {
         $scriptPath = Join-Path (Join-Path $PSScriptRoot "..") "DNS-Benchmark.ps1"
         $scriptContent = Get-Content $scriptPath -Raw
-        $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$null, [ref]$null)
-        $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "TestCount" }
+        $script:paramAst = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$null, [ref]$null)
+    }
+
+    It "Should define TestCount with ValidateRange(1, 100)" {
+        $param = $script:paramAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "TestCount" }
+        $validateRange = $param.Attributes | Where-Object { $_.TypeName.Name -eq "ValidateRange" }
+        $validateRange | Should -Not -BeNullOrEmpty
+    }
+
+    It "Should define a -Parallel switch parameter (#12)" {
+        $param = $script:paramAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "Parallel" }
+        $param | Should -Not -BeNullOrEmpty
+        $param.StaticType.Name | Should -Be "SwitchParameter"
+    }
+
+    It "Should define -ThrottleLimit with ValidateRange(1, 64) (#12)" {
+        $param = $script:paramAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "ThrottleLimit" }
+        $param | Should -Not -BeNullOrEmpty
         $validateRange = $param.Attributes | Where-Object { $_.TypeName.Name -eq "ValidateRange" }
         $validateRange | Should -Not -BeNullOrEmpty
     }
