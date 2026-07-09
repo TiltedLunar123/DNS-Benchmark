@@ -83,6 +83,9 @@ The script will benchmark all DNS servers and ask before applying any changes.
 # Also set the winner's IPv6 DNS (dual-stack networks)
 .\DNS-Benchmark.ps1 -IncludeIPv6
 
+# Benchmark the resolvers in parallel (PowerShell 7+, much faster)
+.\DNS-Benchmark.ps1 -Parallel
+
 # Combine flags
 .\DNS-Benchmark.ps1 -TestCount 10 -Report -SkipApply
 
@@ -99,6 +102,8 @@ The script will benchmark all DNS servers and ask before applying any changes.
 | `-Restore` | switch | false | Reset DNS to DHCP/automatic |
 | `-Report` | switch | false | Export results to CSV |
 | `-IncludeIPv6` | switch | false | Also apply the winner's IPv6 DNS (see below) |
+| `-Parallel` | switch | false | Benchmark resolvers concurrently (PowerShell 7+; see below) |
+| `-ThrottleLimit` | int | 8 | Max resolvers benchmarked at once with `-Parallel` |
 
 ## IPv6 (Dual-Stack Networks)
 
@@ -112,6 +117,26 @@ resolver publishes IPv6 anycast (most in the list do; a few are IPv4-only and
 are applied as IPv4 only). The previous IPv6 servers are saved in the same
 backup, and `-Restore` clears both families. It stays off by default so an
 IPv6 configuration is never changed unless you ask for it.
+
+## Parallel Mode
+
+By default the benchmark tests one resolver at a time. With 17 servers that
+takes a couple of minutes at the default query count. Run with `-Parallel` to
+test them concurrently and finish much faster:
+
+```powershell
+.\DNS-Benchmark.ps1 -Parallel
+.\DNS-Benchmark.ps1 -Parallel -ThrottleLimit 16
+```
+
+`-Parallel` needs PowerShell 7 or newer, since it uses `ForEach-Object
+-Parallel`. On Windows PowerShell 5.1 it prints a note and runs sequentially.
+`-ThrottleLimit` (default 8) caps how many resolvers are measured at once.
+
+One tradeoff: running the servers at the same time means they share your
+connection while their latency is being measured, so numbers can read a little
+higher than a clean sequential run. Leave `-Parallel` off when you want the
+most precise ranking; use it when you just want a fast answer.
 
 ## How Scoring Works
 
@@ -151,7 +176,7 @@ Results are displayed with letter grades (A+ through F) and the top 3 are starre
 ## Requirements
 
 - Windows 10/11
-- PowerShell 5.1+ (pre-installed on Windows 10/11)
+- PowerShell 5.1+ (pre-installed on Windows 10/11); `-Parallel` needs PowerShell 7+
 - **Run as Administrator** (required to change DNS settings)
 
 ## License
