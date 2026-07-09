@@ -24,11 +24,23 @@
     IPv6 config is never changed unless asked for. Without it, a dual-stack box
     can still resolve over whatever IPv6 DNS the router handed out.
 
+.PARAMETER Parallel
+    Benchmark the resolvers concurrently instead of one at a time. Needs
+    PowerShell 7+ (ForEach-Object -Parallel); on Windows PowerShell 5.1 it falls
+    back to a sequential run. Finishes much faster, at the cost of a little
+    latency precision since the servers now share the link while being measured.
+    Off by default.
+
+.PARAMETER ThrottleLimit
+    How many resolvers to benchmark at once when -Parallel is set. Default: 8.
+
 .EXAMPLE
     .\DNS-Benchmark.ps1
     .\DNS-Benchmark.ps1 -TestCount 10 -Report
     .\DNS-Benchmark.ps1 -SkipApply
     .\DNS-Benchmark.ps1 -IncludeIPv6
+    .\DNS-Benchmark.ps1 -Parallel
+    .\DNS-Benchmark.ps1 -Parallel -ThrottleLimit 16 -SkipApply
     .\DNS-Benchmark.ps1 -Restore
 #>
 
@@ -39,7 +51,10 @@ param(
     [switch]$SkipApply,
     [switch]$Restore,
     [switch]$Report,
-    [switch]$IncludeIPv6
+    [switch]$IncludeIPv6,
+    [switch]$Parallel,
+    [ValidateRange(1, 64)]
+    [int]$ThrottleLimit = 8
 )
 
 # -- Admin check --------------------------------------------------------------------------
@@ -399,6 +414,59 @@ function Test-IPv6Available {
     [bool]($binding -and $binding.Enabled)
 }
 
+function Test-ParallelSupported {
+    <#
+    .SYNOPSIS
+        Returns $true when the running PowerShell can run the benchmark in parallel (#12).
+    .DESCRIPTION
+        Parallel benchmarking relies on the thread-based ForEach-Object -Parallel that
+        arrived in PowerShell 7.0. Windows PowerShell 5.1 has no such thing, so -Parallel
+        falls back to the sequential loop there. The version is passed in rather than read
+        from $PSVersionTable so this stays a pure, testable check.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [version]$PSVersion
+    )
+    $PSVersion.Major -ge 7
+}
+
+function Invoke-ParallelBenchmark {
+    <#
+    .SYNOPSIS
+        Benchmarks every resolver concurrently and returns their result objects (#12).
+    .DESCRIPTION
+        Fans the per-server work out across threads with ForEach-Object -Parallel and
+        reuses the same Get-DnsServerResults that the sequential path uses, so a server's
+        score is computed identically either way. Functions defined in the parent scope
+        are not visible inside a -Parallel block, so Get-DnsServerResults is rebuilt inside
+        each thread from its source text (passed as -GetResultsDef). Results arrive in
+        completion order, which is fine because the caller re-sorts by composite score.
+        Requires PowerShell 7+; Test-ParallelSupported gates the call.
+    .PARAMETER GetResultsDef
+        The source text of Get-DnsServerResults, e.g.
+        ${function:Get-DnsServerResults}.ToString().
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [array]$DnsServers,
+        [Parameter(Mandatory)]
+        [string[]]$Domains,
+        [Parameter(Mandatory)]
+        [int]$QueryCount,
+        [Parameter(Mandatory)]
+        [string]$GetResultsDef,
+        [ValidateRange(1, 64)]
+        [int]$ThrottleLimit = 8
+    )
+
+    $DnsServers | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+        # Rebuild the benchmarking function in this thread's runspace, then run it.
+        ${function:Get-DnsServerResults} = $using:GetResultsDef
+        Get-DnsServerResults -DnsServer $_ -Domains $using:Domains -QueryCount $using:QueryCount
+    }
+}
+
 # -- Banner ---------------------------------------------------------------------
 Write-Host ""
 Write-Host "   ____  _   _ ____  " -ForegroundColor Cyan
@@ -502,26 +570,46 @@ Write-Success "Connectivity OK (reached $($connectivity.ReachableServers -join '
 # -- Benchmark ------------------------------------------------------------------
 Write-Header "Benchmarking $($DnsServers.Count) DNS Servers"
 Write-Info "Testing $TestCount queries x $($TestDomains.Count) domains per server..."
-Write-Host ""
 
-$results = @()
-$serverIndex = 0
-$maxNameLen = ($DnsServers | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
-$progressWidth = 32 + $maxNameLen
-
-foreach ($dns in $DnsServers) {
-    $serverIndex++
-    $pct = [math]::Floor(($serverIndex / $DnsServers.Count) * 100)
-    $bar = "#" * [math]::Floor($pct / 5) + "-" * (20 - [math]::Floor($pct / 5))
-    $line = "  [$bar] $pct% - Testing $($dns.Name)..."
-    Write-Host "`r$($line.PadRight($progressWidth))" -NoNewline -ForegroundColor White
-
-    $results += Get-DnsServerResults -DnsServer $dns -Domains $TestDomains -QueryCount $TestCount
+# -Parallel only works on PowerShell 7+, where ForEach-Object -Parallel exists.
+# On 5.1 we say so and run sequentially rather than failing.
+$useParallel = $Parallel -and (Test-ParallelSupported -PSVersion $PSVersionTable.PSVersion)
+if ($Parallel -and -not $useParallel) {
+    Write-Info "-Parallel needs PowerShell 7 or newer. Running sequentially instead."
 }
-
-$doneLine = "  [####################] 100% - Done!"
-Write-Host "`r$($doneLine.PadRight($progressWidth))" -ForegroundColor Green
 Write-Host ""
+
+if ($useParallel) {
+    Write-Info "Running benchmarks in parallel (up to $ThrottleLimit at once)."
+    Write-Info "Latency can read a touch higher than a sequential run since the servers share the link; drop -Parallel when you want the most precise numbers."
+    Write-Host ""
+
+    $results = @(Invoke-ParallelBenchmark -DnsServers $DnsServers -Domains $TestDomains -QueryCount $TestCount `
+        -GetResultsDef (${function:Get-DnsServerResults}.ToString()) -ThrottleLimit $ThrottleLimit)
+
+    Write-Success "Benchmarked $($results.Count) servers."
+    Write-Host ""
+}
+else {
+    $results = @()
+    $serverIndex = 0
+    $maxNameLen = ($DnsServers | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+    $progressWidth = 32 + $maxNameLen
+
+    foreach ($dns in $DnsServers) {
+        $serverIndex++
+        $pct = [math]::Floor(($serverIndex / $DnsServers.Count) * 100)
+        $bar = "#" * [math]::Floor($pct / 5) + "-" * (20 - [math]::Floor($pct / 5))
+        $line = "  [$bar] $pct% - Testing $($dns.Name)..."
+        Write-Host "`r$($line.PadRight($progressWidth))" -NoNewline -ForegroundColor White
+
+        $results += Get-DnsServerResults -DnsServer $dns -Domains $TestDomains -QueryCount $TestCount
+    }
+
+    $doneLine = "  [####################] 100% - Done!"
+    Write-Host "`r$($doneLine.PadRight($progressWidth))" -ForegroundColor Green
+    Write-Host ""
+}
 
 # -- Composite Scoring ----------------------------------------------------------
 # Weights: Speed 40%, Reliability 25%, Security 25%, Consistency 10%
