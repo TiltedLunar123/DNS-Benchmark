@@ -13,7 +13,13 @@
     Run benchmark only without applying changes.
 
 .PARAMETER Restore
-    Restore DNS to automatic (DHCP) settings.
+    Put back the DNS this tool replaced, reading the newest backup written for
+    the adapter. When that backup shows the adapter was on DHCP, or there is no
+    backup to read, it resets to automatic (DHCP) as before.
+
+.PARAMETER ResetDhcp
+    Used with -Restore. Skip the backup and reset the adapter to automatic
+    (DHCP) no matter what was there before.
 
 .PARAMETER Report
     Export results to a CSV file.
@@ -42,6 +48,7 @@
     .\DNS-Benchmark.ps1 -Parallel
     .\DNS-Benchmark.ps1 -Parallel -ThrottleLimit 16 -SkipApply
     .\DNS-Benchmark.ps1 -Restore
+    .\DNS-Benchmark.ps1 -Restore -ResetDhcp
 #>
 
 [CmdletBinding()]
@@ -50,6 +57,7 @@ param(
     [int]$TestCount = 5,
     [switch]$SkipApply,
     [switch]$Restore,
+    [switch]$ResetDhcp,
     [switch]$Report,
     [switch]$IncludeIPv6,
     [switch]$Parallel,
@@ -82,14 +90,84 @@ function Write-Info    { param($Text) Write-Host "  [i] $Text" -ForegroundColor 
 
 # -- Testable Functions ---------------------------------------------------------
 
+function Select-PreferredAdapter {
+    <#
+    .SYNOPSIS
+        Picks the best candidate out of a set of adapters and a default-route
+        table. Pure, so the choice can be tested without a network.
+    .DESCRIPTION
+        Filtering to Up and non-virtual then taking the first result leaves the
+        answer up to whatever order Get-NetAdapter happened to return, and that
+        order is not documented anywhere. On a laptop with Ethernet and Wi-Fi
+        both up it is a coin flip, and benchmarking one NIC then writing DNS to
+        the other is a silent no-op from the user's side.
+
+        The adapter carrying the default route is the one traffic actually
+        leaves by, so that wins, cheapest total metric first. Ties go to the
+        earlier adapter, and anything unresolvable falls back to the old
+        first-match behaviour rather than failing.
+    .PARAMETER DefaultRoutes
+        Rows from Get-NetRoute for 0.0.0.0/0. Only InterfaceIndex, RouteMetric
+        and InterfaceMetric are read.
+    #>
+    param(
+        [AllowEmptyCollection()]
+        [array]$Adapters = @(),
+        [AllowEmptyCollection()]
+        [array]$DefaultRoutes = @()
+    )
+
+    $candidates = @($Adapters | Where-Object {
+        $_ -and $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth"
+    })
+
+    if ($candidates.Count -eq 0) { return $null }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+
+    # Cheapest default route per interface index.
+    $metrics = @{}
+    foreach ($route in @($DefaultRoutes)) {
+        if (-not $route) { continue }
+        $idx = $route.InterfaceIndex
+        if ($null -eq $idx) { continue }
+        $cost = [int]$route.RouteMetric + [int]$route.InterfaceMetric
+        if (-not $metrics.ContainsKey($idx) -or $cost -lt $metrics[$idx]) { $metrics[$idx] = $cost }
+    }
+
+    $best = $null
+    $bestCost = [int]::MaxValue
+    foreach ($candidate in $candidates) {
+        $idx = $candidate.InterfaceIndex
+        if ($null -eq $idx -or -not $metrics.ContainsKey($idx)) { continue }
+        # Strictly less than, so an earlier adapter keeps a tie.
+        if ($metrics[$idx] -lt $bestCost) {
+            $bestCost = $metrics[$idx]
+            $best = $candidate
+        }
+    }
+
+    if ($best) { return $best }
+    $candidates[0]
+}
+
 function Get-ActiveNetworkAdapter {
     <#
     .SYNOPSIS
-        Returns the first active, non-virtual, non-Bluetooth network adapter.
+        Returns the active, non-virtual, non-Bluetooth adapter that carries the
+        default route, falling back to the first match when no route is readable.
     #>
-    Get-NetAdapter | Where-Object {
-        $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth"
-    } | Select-Object -First 1
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+
+    $routes = @()
+    try {
+        $routes = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop)
+    }
+    catch {
+        # No route table to read, so fall back to the first usable adapter.
+        Write-Verbose "Could not read the default route table: $_"
+    }
+
+    Select-PreferredAdapter -Adapters $adapters -DefaultRoutes $routes
 }
 
 function Get-DnsServerResults {
@@ -270,6 +348,113 @@ function Backup-DnsSettings {
     $backupPath
 }
 
+function Get-LatestDnsBackup {
+    <#
+    .SYNOPSIS
+        Returns the newest backup recorded for an adapter, or $null when there
+        is nothing usable on disk.
+    .DESCRIPTION
+        Backup-DnsSettings has been writing dns-backup_*.json since the first
+        release and nothing ever read one back, so -Restore could only ever drop
+        the machine to DHCP. This is the read side. Files are walked newest
+        first, and anything truncated, malformed, or belonging to a different
+        adapter is skipped rather than thrown, because a bad file in the
+        directory should not cost the user their restore.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupDir,
+        [Parameter(Mandatory)]
+        [string]$AdapterName
+    )
+
+    if (-not (Test-Path $BackupDir)) { return $null }
+
+    $files = @(Get-ChildItem -Path $BackupDir -Filter "dns-backup_*.json" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending)
+
+    foreach ($file in $files) {
+        try {
+            $data = Get-Content -Path $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            Write-Verbose "Skipping unreadable backup $($file.Name): $_"
+            continue
+        }
+
+        if (-not $data -or $data.Adapter -ne $AdapterName) { continue }
+
+        $v4 = @(("$($data.PreviousDNS)" -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $v6 = @(("$($data.PreviousDNSv6)" -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+        return [PSCustomObject]@{
+            Path          = $file.FullName
+            Adapter       = $data.Adapter
+            InterfaceIdx  = $data.InterfaceIdx
+            PreviousDNS   = $v4
+            PreviousDNSv6 = $v6
+            Timestamp     = $data.Timestamp
+        }
+    }
+
+    $null
+}
+
+function Get-DnsRestorePlan {
+    <#
+    .SYNOPSIS
+        Decides what -Restore should actually do, given the newest backup.
+    .DESCRIPTION
+        Resetting to DHCP is only right for people who were on DHCP when they
+        ran the benchmark. Someone pointed at a Pi-hole, a work resolver, or a
+        filtered public resolver had that written to the backup file and then
+        silently lost it, because the reset was unconditional. This maps a
+        backup onto one of two outcomes and hands back a sentence explaining the
+        choice, so the script can say why it did what it did.
+
+        A static restore always resets the adapter before writing the recorded
+        servers. Set-DnsClientServerAddress takes no address family of its own,
+        it infers one per address, so without the reset an IPv6 pair applied by
+        an earlier -IncludeIPv6 run would survive a restore of an IPv4-only
+        backup.
+    #>
+    param(
+        [AllowNull()]
+        [PSCustomObject]$Backup
+    )
+
+    if (-not $Backup) {
+        return [PSCustomObject]@{
+            Mode      = "Dhcp"
+            Servers   = @()
+            ServersV4 = @()
+            ServersV6 = @()
+            Reason    = "no backup on file for this adapter"
+        }
+    }
+
+    $v4 = @($Backup.PreviousDNS)
+    $v6 = @($Backup.PreviousDNSv6)
+
+    if ($v4.Count -eq 0 -and $v6.Count -eq 0) {
+        return [PSCustomObject]@{
+            Mode      = "Dhcp"
+            Servers   = @()
+            ServersV4 = @()
+            ServersV6 = @()
+            Reason    = "the backup shows this adapter was on DHCP-supplied DNS"
+        }
+    }
+
+    [PSCustomObject]@{
+        Mode      = "Static"
+        Servers   = @($v4 + $v6)
+        ServersV4 = $v4
+        ServersV6 = $v6
+        Reason    = "restoring the DNS recorded in $(Split-Path $Backup.Path -Leaf)"
+    }
+}
+
 function Test-StaticDnsConfigured {
     <#
     .SYNOPSIS
@@ -347,6 +532,49 @@ function Set-OptimalDns {
     $ipv6Ok = ($newDns6[0] -eq $PrimaryDnsV6) -and ($newDns6.Count -ge 2 -and $newDns6[1] -eq $SecondaryDnsV6)
 
     $ipv4Ok -and $ipv6Ok
+}
+
+function Test-DnsAlreadyOptimal {
+    <#
+    .SYNOPSIS
+        Returns $true when the adapter is already pointed at exactly the DNS the
+        benchmark wants to apply, so the run can stop without touching anything.
+    .DESCRIPTION
+        The old inline check compared $currentDns[0] against the winner's primary
+        and nothing else. That predates IPv6 support, so a machine already on the
+        winning IPv4 pair with the router's IPv6 DNS still bound counted as
+        optimal and -IncludeIPv6 could never apply. That is the exact leak the
+        switch exists to close. A mismatched secondary slipped through the same
+        way.
+
+        Both addresses of a family have to match, and the list has to be exactly
+        that pair: an adapter carrying a third server is not what an apply would
+        leave behind, so it is not already optimal. IPv6 is only weighed when
+        -IncludeV6 is set, since without it the IPv6 config is never touched.
+    #>
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDns = @(),
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDnsV6 = @(),
+        [Parameter(Mandatory)]
+        [string]$PrimaryDns,
+        [Parameter(Mandatory)]
+        [string]$SecondaryDns,
+        [string]$PrimaryDnsV6 = "",
+        [string]$SecondaryDnsV6 = "",
+        [switch]$IncludeV6
+    )
+
+    $current = @($CurrentDns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $v4Ok = ($current.Count -eq 2) -and ($current[0] -eq $PrimaryDns) -and ($current[1] -eq $SecondaryDns)
+
+    if (-not $IncludeV6) { return $v4Ok }
+
+    $current6 = @($CurrentDnsV6 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $v6Ok = ($current6.Count -eq 2) -and ($current6[0] -eq $PrimaryDnsV6) -and ($current6[1] -eq $SecondaryDnsV6)
+
+    $v4Ok -and $v6Ok
 }
 
 function Test-NetworkConnectivity {
@@ -520,7 +748,7 @@ $TestDomains = @(
 
 # -- Restore mode ---------------------------------------------------------------
 if ($Restore) {
-    Write-Header "Restoring DNS to Automatic (DHCP)"
+    Write-Header "Restoring Previous DNS Settings"
 
     $adapter = Get-ActiveNetworkAdapter
     if (-not $adapter) {
@@ -530,14 +758,44 @@ if ($Restore) {
 
     Write-Status "Adapter: $($adapter.Name)"
 
+    # -ResetDhcp is the old unconditional behaviour, kept for anyone who wants
+    # DHCP regardless of what the backup says.
+    $plan = if ($ResetDhcp) {
+        [PSCustomObject]@{ Mode = "Dhcp"; Servers = @(); ServersV4 = @(); ServersV6 = @(); Reason = "-ResetDhcp was passed" }
+    } else {
+        Get-DnsRestorePlan -Backup (Get-LatestDnsBackup -BackupDir $ScriptDir -AdapterName $adapter.Name)
+    }
+
+    if ($plan.Mode -eq "Static") {
+        Write-Info "Source: $($plan.Reason)"
+        try {
+            # Reset first so a family the backup does not mention goes back to
+            # DHCP instead of keeping whatever this tool last applied to it.
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses -ErrorAction Stop
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $plan.Servers -ErrorAction Stop
+        }
+        catch {
+            Write-Err "Failed to restore DNS: $_"
+            Write-Info "Run '.\DNS-Benchmark.ps1 -Restore -ResetDhcp' to fall back to automatic DNS."
+            exit 1
+        }
+        $null = Clear-DnsClientCache 2>$null
+        Write-Success "DNS restored on '$($adapter.Name)': $($plan.ServersV4 -join ', ')"
+        if ($plan.ServersV6.Count -gt 0) { Write-Success "IPv6 DNS restored: $($plan.ServersV6 -join ', ')" }
+        Write-Info "DNS cache flushed"
+        exit 0
+    }
+
     if (-not (Test-StaticDnsConfigured -InterfaceIndex $adapter.InterfaceIndex)) {
         Write-Info "'$($adapter.Name)' is already using DHCP-supplied DNS. Nothing to restore."
         exit 0
     }
 
+    Write-Info "Falling back to automatic DNS: $($plan.Reason)."
     Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+    $null = Clear-DnsClientCache 2>$null
     Write-Success "DNS restored to automatic (DHCP) on '$($adapter.Name)'"
-    Write-Info "You may need to run: ipconfig /flushdns"
+    Write-Info "DNS cache flushed"
     exit 0
 }
 
@@ -700,8 +958,30 @@ if (-not $SkipApply) {
         }
     }
 
+    # Read the current IPv6 servers before deciding whether anything needs to
+    # change. With -IncludeIPv6 an adapter can already hold the winning IPv4 pair
+    # while still resolving over whatever IPv6 DNS the router handed out, and
+    # that is precisely the case the switch is for.
+    $currentDnsV6 = @()
+    if ($applyV6) {
+        try {
+            $currentDnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses)
+        } catch {
+            $currentDnsV6 = @()
+        }
+    }
+
     # Check if already using the winner
-    if ($currentDns -and $currentDns[0] -eq $winner.Primary) {
+    $optimalCheck = @{
+        CurrentDns     = @($currentDns)
+        CurrentDnsV6   = $currentDnsV6
+        PrimaryDns     = $winner.Primary
+        SecondaryDns   = $winner.Secondary
+        PrimaryDnsV6   = $winnerV6Primary
+        SecondaryDnsV6 = $winnerV6Secondary
+        IncludeV6      = $applyV6
+    }
+    if (Test-DnsAlreadyOptimal @optimalCheck) {
         Write-Success "You're already using the best DNS ($($winner.Name)). No changes needed!"
         exit 0
     }
@@ -718,15 +998,6 @@ if (-not $SkipApply) {
     $confirm = Read-Host "  Apply these settings? (Y/n)"
     if ($confirm -match "^[Yy]?$") {
         try {
-            $currentDnsV6 = @()
-            if ($applyV6) {
-                try {
-                    $currentDnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses)
-                } catch {
-                    $currentDnsV6 = @()
-                }
-            }
-
             $backupPath = Backup-DnsSettings -BackupDir $ScriptDir -AdapterName $adapter.Name -InterfaceIndex $adapter.InterfaceIndex -CurrentDns $currentDns -CurrentDnsV6 $currentDnsV6
             Write-Info "Backup saved: $backupPath"
 

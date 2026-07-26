@@ -273,6 +273,13 @@ Describe "Get-DnsServerResults" {
 # Get-ActiveNetworkAdapter (mocked Get-NetAdapter)
 # ---------------------------------------------------------------------------
 Describe "Get-ActiveNetworkAdapter" {
+    BeforeEach {
+        # No default route in these cases, which exercises the fallback and keeps
+        # the expectations the same as before route awareness went in. Route
+        # ranking has its own coverage under Select-PreferredAdapter.
+        Mock Get-NetRoute { @() }
+    }
+
     Context "When adapters are available" {
         It "Should return the first UP, non-virtual adapter" {
             Mock Get-NetAdapter {
@@ -329,6 +336,113 @@ Describe "Get-ActiveNetworkAdapter" {
             $result = Get-ActiveNetworkAdapter
             $result | Should -BeNullOrEmpty
         }
+    }
+
+    Context "When the default route is readable" {
+        It "Should pick the adapter that owns the default route" {
+            Mock Get-NetAdapter {
+                @(
+                    [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+                    [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+                )
+            }
+            Mock Get-NetRoute {
+                @([PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+            }
+            (Get-ActiveNetworkAdapter).Name | Should -Be "Ethernet"
+        }
+
+        It "Should fall back to the first adapter when the route table cannot be read" {
+            Mock Get-NetAdapter {
+                @(
+                    [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+                    [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+                )
+            }
+            Mock Get-NetRoute { throw "the route table is unavailable" }
+            (Get-ActiveNetworkAdapter).Name | Should -Be "Wi-Fi"
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Select-PreferredAdapter
+# ---------------------------------------------------------------------------
+# Get-NetAdapter has no documented ordering, so "-First 1" on a box with
+# Ethernet and Wi-Fi both up was a coin flip. Benchmarking one NIC and writing
+# DNS to the other looks like nothing happened.
+Describe "Select-PreferredAdapter" {
+    BeforeAll {
+        $wifi = [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+        $eth  = [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+        $down = [PSCustomObject]@{ Name = "Ethernet 2"; Status = "Disconnected"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 9 }
+        $virt = [PSCustomObject]@{ Name = "vEthernet"; Status = "Up"; InterfaceDescription = "Hyper-V Virtual Ethernet"; InterfaceIndex = 20 }
+    }
+
+    It "Should return `$null when there are no adapters at all" {
+        Select-PreferredAdapter -Adapters @() -DefaultRoutes @() | Should -BeNullOrEmpty
+    }
+
+    It "Should return `$null when every adapter is filtered out" {
+        Select-PreferredAdapter -Adapters @($down, $virt) -DefaultRoutes @() | Should -BeNullOrEmpty
+    }
+
+    It "Should return the only candidate without consulting routes" {
+        (Select-PreferredAdapter -Adapters @($down, $wifi) -DefaultRoutes @()).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should prefer the adapter holding the default route over list order" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should pick the cheapest total metric when both have a default route" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0; InterfaceMetric = 45 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0; InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should add RouteMetric to InterfaceMetric when ranking" {
+        # Wi-Fi wins on interface metric alone; the route metric flips it.
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 300; InterfaceMetric = 20 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0;   InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should keep the cheapest route when one interface has several" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 500; InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0;   InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0;   InterfaceMetric = 100 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should give a tie to the earlier adapter" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0; InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0; InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should fall back to the first candidate when no route matches a candidate" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 99; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should never return a filtered-out adapter even when it owns the route" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 20; RouteMetric = 0; InterfaceMetric = 5 })
+        (Select-PreferredAdapter -Adapters @($virt, $wifi) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should survive a null entry in the route table" {
+        $routes = @($null, [PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
     }
 }
 
@@ -435,6 +549,162 @@ Describe "Backup-DnsSettings" {
 # ---------------------------------------------------------------------------
 # Test-StaticDnsConfigured (#16 - restore mode DHCP detection)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Get-LatestDnsBackup / Get-DnsRestorePlan
+# ---------------------------------------------------------------------------
+# Backup-DnsSettings wrote these files from day one and nothing ever read one,
+# so -Restore could only drop the machine to DHCP. Anyone on a Pi-hole or a
+# work resolver lost it and was told the restore succeeded.
+Describe "Get-LatestDnsBackup" {
+    BeforeAll {
+        function New-TestBackup {
+            param($Dir, $Name, $Adapter, $Idx, $V4, $V6, $Minutes)
+            $path = Join-Path $Dir $Name
+            @{
+                Adapter       = $Adapter
+                InterfaceIdx  = $Idx
+                PreviousDNS   = ($V4 -join ",")
+                PreviousDNSv6 = ($V6 -join ",")
+                Timestamp     = (Get-Date).ToString("o")
+            } | ConvertTo-Json | Out-File -FilePath $path -Encoding UTF8
+            # Selection is by write time, so pin it rather than racing the clock.
+            (Get-Item $path).LastWriteTime = (Get-Date).AddMinutes($Minutes)
+            $path
+        }
+
+        $restoreDir = Join-Path $env:TEMP "pester-dns-restore-$(Get-Random)"
+        New-Item -Path $restoreDir -ItemType Directory -Force | Out-Null
+    }
+
+    AfterAll {
+        Remove-Item $restoreDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Should return `$null when the backup directory does not exist" {
+        Get-LatestDnsBackup -BackupDir (Join-Path $env:TEMP "no-such-dir-$(Get-Random)") -AdapterName "Wi-Fi" |
+            Should -BeNullOrEmpty
+    }
+
+    It "Should return `$null when no backup matches the adapter" {
+        $dir = Join-Path $restoreDir "nomatch-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Ethernet" -Idx 5 -V4 @("9.9.9.9") -V6 @() -Minutes -10 | Out-Null
+        Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi" | Should -BeNullOrEmpty
+    }
+
+    It "Should pick the newest backup for the adapter" {
+        $dir = Join-Path $restoreDir "newest-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("8.8.8.8", "8.8.4.4") -V6 @() -Minutes -60 | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-02_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should skip a newer backup belonging to another adapter" {
+        $dir = Join-Path $restoreDir "otheradapter-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -60 | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-02_000000.json" -Adapter "Ethernet" -Idx 5 -V4 @("10.0.0.1") -V6 @() -Minutes -1 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should skip a malformed file and keep looking" {
+        $dir = Join-Path $restoreDir "malformed-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        $bad = Join-Path $dir "dns-backup_2026-01-03_000000.json"
+        "{ not json at all" | Out-File -FilePath $bad -Encoding UTF8
+        (Get-Item $bad).LastWriteTime = (Get-Date)
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -60 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should split both address families out of the stored strings" {
+        $dir = Join-Path $restoreDir "families-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 `
+            -V4 @("192.168.1.10", "192.168.1.11") -V6 @("fd00::1", "fd00::2") -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10", "192.168.1.11")
+        $backup.PreviousDNSv6 | Should -Be @("fd00::1", "fd00::2")
+    }
+
+    It "Should hand back empty lists for a DHCP backup" {
+        $dir = Join-Path $restoreDir "dhcp-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @() -V6 @() -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS.Count | Should -Be 0
+        $backup.PreviousDNSv6.Count | Should -Be 0
+    }
+
+    It "Should round-trip a backup written by Backup-DnsSettings" {
+        $dir = Join-Path $restoreDir "roundtrip-$(Get-Random)"
+        Backup-DnsSettings -BackupDir $dir -AdapterName "Wi-Fi" -InterfaceIndex 12 `
+            -CurrentDns @("192.168.1.10", "1.1.1.1") -CurrentDnsV6 @("fd00::1") | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10", "1.1.1.1")
+        $backup.PreviousDNSv6 | Should -Be @("fd00::1")
+    }
+}
+
+Describe "Get-DnsRestorePlan" {
+    It "Should fall back to DHCP when there is no backup" {
+        $plan = Get-DnsRestorePlan -Backup $null
+        $plan.Mode | Should -Be "Dhcp"
+        $plan.Reason | Should -Match "no backup"
+    }
+
+    It "Should fall back to DHCP when the backup recorded no servers" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @(); PreviousDNSv6 = @()
+        })
+        $plan.Mode | Should -Be "Dhcp"
+        $plan.Reason | Should -Match "DHCP"
+    }
+
+    It "Should restore a static IPv4 config instead of resetting to DHCP" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @("192.168.1.10", "1.1.1.1"); PreviousDNSv6 = @()
+        })
+        $plan.Mode | Should -Be "Static"
+        $plan.Servers | Should -Be @("192.168.1.10", "1.1.1.1")
+        $plan.ServersV6.Count | Should -Be 0
+    }
+
+    It "Should put both families in the address list, IPv4 first" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @("192.168.1.10"); PreviousDNSv6 = @("fd00::1")
+        })
+        $plan.Servers | Should -Be @("192.168.1.10", "fd00::1")
+        $plan.ServersV4 | Should -Be @("192.168.1.10")
+        $plan.ServersV6 | Should -Be @("fd00::1")
+    }
+
+    It "Should restore an IPv6-only backup" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @(); PreviousDNSv6 = @("fd00::1", "fd00::2")
+        })
+        $plan.Mode | Should -Be "Static"
+        $plan.Servers | Should -Be @("fd00::1", "fd00::2")
+    }
+
+    It "Should name the backup file it is restoring from" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_2026-01-01_000000.json"; PreviousDNS = @("192.168.1.10"); PreviousDNSv6 = @()
+        })
+        $plan.Reason | Should -Match "dns-backup_2026-01-01_000000\.json"
+    }
+}
+
 Describe "Test-StaticDnsConfigured" {
     It "Should return `$false when adapter has no static DNS list (DHCP-only)" {
         Mock Get-CimInstance {
@@ -553,6 +823,87 @@ Describe "Set-OptimalDns (IPv6)" {
         $result = Set-OptimalDns -InterfaceIndex 5 -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
             -PrimaryDnsV6 "2606:4700:4700::1111"
         $result | Should -Be $true
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Test-DnsAlreadyOptimal
+# ---------------------------------------------------------------------------
+# The apply path used to short-circuit on "$currentDns[0] -eq winner.Primary".
+# That let two cases through: a machine on the winning IPv4 pair whose IPv6 DNS
+# still came from the router (so -IncludeIPv6 could never do its one job), and a
+# machine whose primary matched but whose secondary did not.
+Describe "Test-DnsAlreadyOptimal" {
+    Context "IPv4 only" {
+        It "Should return `$true when both addresses match" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $true
+        }
+
+        It "Should return `$false when only the primary matches" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "8.8.4.4") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when the pair is in the wrong order" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.0.0.1", "1.1.1.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when a third server is also configured" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1", "8.8.8.8") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when only one server is configured" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false on a DHCP adapter with no static servers" {
+            Test-DnsAlreadyOptimal -CurrentDns @() `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should ignore the IPv6 list when -IncludeV6 is not set" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("fd00::1", "fd00::2") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $true
+        }
+    }
+
+    Context "With -IncludeV6" {
+        It "Should return `$false when IPv4 matches but IPv6 came from the router" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("fd00::1", "fd00::2") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
+
+        It "Should return `$false when IPv4 matches and no IPv6 is set at all" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @() `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
+
+        It "Should return `$true only when both families match" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("2606:4700:4700::1111", "2606:4700:4700::1001") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $true
+        }
+
+        It "Should return `$false when IPv6 matches but IPv4 does not" {
+            Test-DnsAlreadyOptimal -CurrentDns @("8.8.8.8", "8.8.4.4") `
+                -CurrentDnsV6 @("2606:4700:4700::1111", "2606:4700:4700::1001") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
     }
 }
 
