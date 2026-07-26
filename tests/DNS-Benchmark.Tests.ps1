@@ -435,6 +435,162 @@ Describe "Backup-DnsSettings" {
 # ---------------------------------------------------------------------------
 # Test-StaticDnsConfigured (#16 - restore mode DHCP detection)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Get-LatestDnsBackup / Get-DnsRestorePlan
+# ---------------------------------------------------------------------------
+# Backup-DnsSettings wrote these files from day one and nothing ever read one,
+# so -Restore could only drop the machine to DHCP. Anyone on a Pi-hole or a
+# work resolver lost it and was told the restore succeeded.
+Describe "Get-LatestDnsBackup" {
+    BeforeAll {
+        function New-TestBackup {
+            param($Dir, $Name, $Adapter, $Idx, $V4, $V6, $Minutes)
+            $path = Join-Path $Dir $Name
+            @{
+                Adapter       = $Adapter
+                InterfaceIdx  = $Idx
+                PreviousDNS   = ($V4 -join ",")
+                PreviousDNSv6 = ($V6 -join ",")
+                Timestamp     = (Get-Date).ToString("o")
+            } | ConvertTo-Json | Out-File -FilePath $path -Encoding UTF8
+            # Selection is by write time, so pin it rather than racing the clock.
+            (Get-Item $path).LastWriteTime = (Get-Date).AddMinutes($Minutes)
+            $path
+        }
+
+        $restoreDir = Join-Path $env:TEMP "pester-dns-restore-$(Get-Random)"
+        New-Item -Path $restoreDir -ItemType Directory -Force | Out-Null
+    }
+
+    AfterAll {
+        Remove-Item $restoreDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It "Should return `$null when the backup directory does not exist" {
+        Get-LatestDnsBackup -BackupDir (Join-Path $env:TEMP "no-such-dir-$(Get-Random)") -AdapterName "Wi-Fi" |
+            Should -BeNullOrEmpty
+    }
+
+    It "Should return `$null when no backup matches the adapter" {
+        $dir = Join-Path $restoreDir "nomatch-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Ethernet" -Idx 5 -V4 @("9.9.9.9") -V6 @() -Minutes -10 | Out-Null
+        Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi" | Should -BeNullOrEmpty
+    }
+
+    It "Should pick the newest backup for the adapter" {
+        $dir = Join-Path $restoreDir "newest-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("8.8.8.8", "8.8.4.4") -V6 @() -Minutes -60 | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-02_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should skip a newer backup belonging to another adapter" {
+        $dir = Join-Path $restoreDir "otheradapter-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -60 | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-02_000000.json" -Adapter "Ethernet" -Idx 5 -V4 @("10.0.0.1") -V6 @() -Minutes -1 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should skip a malformed file and keep looking" {
+        $dir = Join-Path $restoreDir "malformed-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        $bad = Join-Path $dir "dns-backup_2026-01-03_000000.json"
+        "{ not json at all" | Out-File -FilePath $bad -Encoding UTF8
+        (Get-Item $bad).LastWriteTime = (Get-Date)
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @("192.168.1.10") -V6 @() -Minutes -60 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10")
+    }
+
+    It "Should split both address families out of the stored strings" {
+        $dir = Join-Path $restoreDir "families-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 `
+            -V4 @("192.168.1.10", "192.168.1.11") -V6 @("fd00::1", "fd00::2") -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10", "192.168.1.11")
+        $backup.PreviousDNSv6 | Should -Be @("fd00::1", "fd00::2")
+    }
+
+    It "Should hand back empty lists for a DHCP backup" {
+        $dir = Join-Path $restoreDir "dhcp-$(Get-Random)"
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        New-TestBackup -Dir $dir -Name "dns-backup_2026-01-01_000000.json" -Adapter "Wi-Fi" -Idx 12 -V4 @() -V6 @() -Minutes -5 | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS.Count | Should -Be 0
+        $backup.PreviousDNSv6.Count | Should -Be 0
+    }
+
+    It "Should round-trip a backup written by Backup-DnsSettings" {
+        $dir = Join-Path $restoreDir "roundtrip-$(Get-Random)"
+        Backup-DnsSettings -BackupDir $dir -AdapterName "Wi-Fi" -InterfaceIndex 12 `
+            -CurrentDns @("192.168.1.10", "1.1.1.1") -CurrentDnsV6 @("fd00::1") | Out-Null
+
+        $backup = Get-LatestDnsBackup -BackupDir $dir -AdapterName "Wi-Fi"
+        $backup.PreviousDNS | Should -Be @("192.168.1.10", "1.1.1.1")
+        $backup.PreviousDNSv6 | Should -Be @("fd00::1")
+    }
+}
+
+Describe "Get-DnsRestorePlan" {
+    It "Should fall back to DHCP when there is no backup" {
+        $plan = Get-DnsRestorePlan -Backup $null
+        $plan.Mode | Should -Be "Dhcp"
+        $plan.Reason | Should -Match "no backup"
+    }
+
+    It "Should fall back to DHCP when the backup recorded no servers" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @(); PreviousDNSv6 = @()
+        })
+        $plan.Mode | Should -Be "Dhcp"
+        $plan.Reason | Should -Match "DHCP"
+    }
+
+    It "Should restore a static IPv4 config instead of resetting to DHCP" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @("192.168.1.10", "1.1.1.1"); PreviousDNSv6 = @()
+        })
+        $plan.Mode | Should -Be "Static"
+        $plan.Servers | Should -Be @("192.168.1.10", "1.1.1.1")
+        $plan.ServersV6.Count | Should -Be 0
+    }
+
+    It "Should put both families in the address list, IPv4 first" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @("192.168.1.10"); PreviousDNSv6 = @("fd00::1")
+        })
+        $plan.Servers | Should -Be @("192.168.1.10", "fd00::1")
+        $plan.ServersV4 | Should -Be @("192.168.1.10")
+        $plan.ServersV6 | Should -Be @("fd00::1")
+    }
+
+    It "Should restore an IPv6-only backup" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_x.json"; PreviousDNS = @(); PreviousDNSv6 = @("fd00::1", "fd00::2")
+        })
+        $plan.Mode | Should -Be "Static"
+        $plan.Servers | Should -Be @("fd00::1", "fd00::2")
+    }
+
+    It "Should name the backup file it is restoring from" {
+        $plan = Get-DnsRestorePlan -Backup ([PSCustomObject]@{
+            Path = "C:\tmp\dns-backup_2026-01-01_000000.json"; PreviousDNS = @("192.168.1.10"); PreviousDNSv6 = @()
+        })
+        $plan.Reason | Should -Match "dns-backup_2026-01-01_000000\.json"
+    }
+}
+
 Describe "Test-StaticDnsConfigured" {
     It "Should return `$false when adapter has no static DNS list (DHCP-only)" {
         Mock Get-CimInstance {

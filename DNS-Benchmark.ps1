@@ -13,7 +13,13 @@
     Run benchmark only without applying changes.
 
 .PARAMETER Restore
-    Restore DNS to automatic (DHCP) settings.
+    Put back the DNS this tool replaced, reading the newest backup written for
+    the adapter. When that backup shows the adapter was on DHCP, or there is no
+    backup to read, it resets to automatic (DHCP) as before.
+
+.PARAMETER ResetDhcp
+    Used with -Restore. Skip the backup and reset the adapter to automatic
+    (DHCP) no matter what was there before.
 
 .PARAMETER Report
     Export results to a CSV file.
@@ -42,6 +48,7 @@
     .\DNS-Benchmark.ps1 -Parallel
     .\DNS-Benchmark.ps1 -Parallel -ThrottleLimit 16 -SkipApply
     .\DNS-Benchmark.ps1 -Restore
+    .\DNS-Benchmark.ps1 -Restore -ResetDhcp
 #>
 
 [CmdletBinding()]
@@ -50,6 +57,7 @@ param(
     [int]$TestCount = 5,
     [switch]$SkipApply,
     [switch]$Restore,
+    [switch]$ResetDhcp,
     [switch]$Report,
     [switch]$IncludeIPv6,
     [switch]$Parallel,
@@ -268,6 +276,113 @@ function Backup-DnsSettings {
     }
 
     $backupPath
+}
+
+function Get-LatestDnsBackup {
+    <#
+    .SYNOPSIS
+        Returns the newest backup recorded for an adapter, or $null when there
+        is nothing usable on disk.
+    .DESCRIPTION
+        Backup-DnsSettings has been writing dns-backup_*.json since the first
+        release and nothing ever read one back, so -Restore could only ever drop
+        the machine to DHCP. This is the read side. Files are walked newest
+        first, and anything truncated, malformed, or belonging to a different
+        adapter is skipped rather than thrown, because a bad file in the
+        directory should not cost the user their restore.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupDir,
+        [Parameter(Mandatory)]
+        [string]$AdapterName
+    )
+
+    if (-not (Test-Path $BackupDir)) { return $null }
+
+    $files = @(Get-ChildItem -Path $BackupDir -Filter "dns-backup_*.json" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending)
+
+    foreach ($file in $files) {
+        try {
+            $data = Get-Content -Path $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            Write-Verbose "Skipping unreadable backup $($file.Name): $_"
+            continue
+        }
+
+        if (-not $data -or $data.Adapter -ne $AdapterName) { continue }
+
+        $v4 = @(("$($data.PreviousDNS)" -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $v6 = @(("$($data.PreviousDNSv6)" -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+        return [PSCustomObject]@{
+            Path          = $file.FullName
+            Adapter       = $data.Adapter
+            InterfaceIdx  = $data.InterfaceIdx
+            PreviousDNS   = $v4
+            PreviousDNSv6 = $v6
+            Timestamp     = $data.Timestamp
+        }
+    }
+
+    $null
+}
+
+function Get-DnsRestorePlan {
+    <#
+    .SYNOPSIS
+        Decides what -Restore should actually do, given the newest backup.
+    .DESCRIPTION
+        Resetting to DHCP is only right for people who were on DHCP when they
+        ran the benchmark. Someone pointed at a Pi-hole, a work resolver, or a
+        filtered public resolver had that written to the backup file and then
+        silently lost it, because the reset was unconditional. This maps a
+        backup onto one of two outcomes and hands back a sentence explaining the
+        choice, so the script can say why it did what it did.
+
+        A static restore always resets the adapter before writing the recorded
+        servers. Set-DnsClientServerAddress takes no address family of its own,
+        it infers one per address, so without the reset an IPv6 pair applied by
+        an earlier -IncludeIPv6 run would survive a restore of an IPv4-only
+        backup.
+    #>
+    param(
+        [AllowNull()]
+        [PSCustomObject]$Backup
+    )
+
+    if (-not $Backup) {
+        return [PSCustomObject]@{
+            Mode      = "Dhcp"
+            Servers   = @()
+            ServersV4 = @()
+            ServersV6 = @()
+            Reason    = "no backup on file for this adapter"
+        }
+    }
+
+    $v4 = @($Backup.PreviousDNS)
+    $v6 = @($Backup.PreviousDNSv6)
+
+    if ($v4.Count -eq 0 -and $v6.Count -eq 0) {
+        return [PSCustomObject]@{
+            Mode      = "Dhcp"
+            Servers   = @()
+            ServersV4 = @()
+            ServersV6 = @()
+            Reason    = "the backup shows this adapter was on DHCP-supplied DNS"
+        }
+    }
+
+    [PSCustomObject]@{
+        Mode      = "Static"
+        Servers   = @($v4 + $v6)
+        ServersV4 = $v4
+        ServersV6 = $v6
+        Reason    = "restoring the DNS recorded in $(Split-Path $Backup.Path -Leaf)"
+    }
 }
 
 function Test-StaticDnsConfigured {
@@ -563,7 +678,7 @@ $TestDomains = @(
 
 # -- Restore mode ---------------------------------------------------------------
 if ($Restore) {
-    Write-Header "Restoring DNS to Automatic (DHCP)"
+    Write-Header "Restoring Previous DNS Settings"
 
     $adapter = Get-ActiveNetworkAdapter
     if (-not $adapter) {
@@ -573,14 +688,44 @@ if ($Restore) {
 
     Write-Status "Adapter: $($adapter.Name)"
 
+    # -ResetDhcp is the old unconditional behaviour, kept for anyone who wants
+    # DHCP regardless of what the backup says.
+    $plan = if ($ResetDhcp) {
+        [PSCustomObject]@{ Mode = "Dhcp"; Servers = @(); ServersV4 = @(); ServersV6 = @(); Reason = "-ResetDhcp was passed" }
+    } else {
+        Get-DnsRestorePlan -Backup (Get-LatestDnsBackup -BackupDir $ScriptDir -AdapterName $adapter.Name)
+    }
+
+    if ($plan.Mode -eq "Static") {
+        Write-Info "Source: $($plan.Reason)"
+        try {
+            # Reset first so a family the backup does not mention goes back to
+            # DHCP instead of keeping whatever this tool last applied to it.
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses -ErrorAction Stop
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $plan.Servers -ErrorAction Stop
+        }
+        catch {
+            Write-Err "Failed to restore DNS: $_"
+            Write-Info "Run '.\DNS-Benchmark.ps1 -Restore -ResetDhcp' to fall back to automatic DNS."
+            exit 1
+        }
+        $null = Clear-DnsClientCache 2>$null
+        Write-Success "DNS restored on '$($adapter.Name)': $($plan.ServersV4 -join ', ')"
+        if ($plan.ServersV6.Count -gt 0) { Write-Success "IPv6 DNS restored: $($plan.ServersV6 -join ', ')" }
+        Write-Info "DNS cache flushed"
+        exit 0
+    }
+
     if (-not (Test-StaticDnsConfigured -InterfaceIndex $adapter.InterfaceIndex)) {
         Write-Info "'$($adapter.Name)' is already using DHCP-supplied DNS. Nothing to restore."
         exit 0
     }
 
+    Write-Info "Falling back to automatic DNS: $($plan.Reason)."
     Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses
+    $null = Clear-DnsClientCache 2>$null
     Write-Success "DNS restored to automatic (DHCP) on '$($adapter.Name)'"
-    Write-Info "You may need to run: ipconfig /flushdns"
+    Write-Info "DNS cache flushed"
     exit 0
 }
 
