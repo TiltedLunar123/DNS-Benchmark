@@ -89,8 +89,11 @@ The script will benchmark all DNS servers and ask before applying any changes.
 # Combine flags
 .\DNS-Benchmark.ps1 -TestCount 10 -Report -SkipApply
 
-# Restore DNS back to automatic (DHCP)
+# Put back whatever DNS you had before
 .\DNS-Benchmark.ps1 -Restore
+
+# Restore, but go straight to automatic (DHCP) and ignore the backup
+.\DNS-Benchmark.ps1 -Restore -ResetDhcp
 ```
 
 ## Parameters
@@ -99,11 +102,32 @@ The script will benchmark all DNS servers and ask before applying any changes.
 |-----------|------|---------|-------------|
 | `-TestCount` | int | 5 | Queries per DNS per domain |
 | `-SkipApply` | switch | false | Benchmark only, don't apply changes |
-| `-Restore` | switch | false | Reset DNS to DHCP/automatic |
+| `-Restore` | switch | false | Put back the DNS recorded in the newest backup (see below) |
+| `-ResetDhcp` | switch | false | With `-Restore`, reset to DHCP/automatic and skip the backup |
 | `-Report` | switch | false | Export results to CSV |
 | `-IncludeIPv6` | switch | false | Also apply the winner's IPv6 DNS (see below) |
 | `-Parallel` | switch | false | Benchmark resolvers concurrently (PowerShell 7+; see below) |
 | `-ThrottleLimit` | int | 8 | Max resolvers benchmarked at once with `-Parallel` |
+
+## Restoring
+
+Every apply writes your previous DNS to a timestamped `dns-backup_*.json` next
+to the script, and `-Restore` reads the newest one for that adapter and puts
+those servers back. If you were running a Pi-hole, a work resolver, or anything
+else static, that is what you get back.
+
+When the backup shows the adapter was on DHCP, or there is no backup to read,
+`-Restore` resets to automatic DNS the way it always did. Pass `-ResetDhcp`
+alongside `-Restore` to force the reset regardless of what the backup says.
+
+Both address families are handled. A static restore resets the adapter first,
+so an IPv6 pair applied by an earlier `-IncludeIPv6` run does not outlive a
+restore of an IPv4-only backup. The DNS cache is flushed for you either way.
+
+Older releases reset to DHCP no matter what, which meant a static setup was
+recorded and then dropped. If you upgraded from one of those and your old
+resolver is already gone, the backup that has it is still sitting in the
+script directory.
 
 ## IPv6 (Dual-Stack Networks)
 
@@ -115,7 +139,7 @@ Run with `-IncludeIPv6` to also set the winning provider's IPv6 addresses.
 It only does so when the adapter actually has IPv6 bound and the chosen
 resolver publishes IPv6 anycast (most in the list do; a few are IPv4-only and
 are applied as IPv4 only). The previous IPv6 servers are saved in the same
-backup, and `-Restore` clears both families. It stays off by default so an
+backup, and `-Restore` puts both families back. It stays off by default so an
 IPv6 configuration is never changed unless you ask for it.
 
 ## Parallel Mode
@@ -158,7 +182,8 @@ Results are displayed with letter grades (A+ through F) and the top 3 are starre
 - **Pre-flight connectivity check** - probes a few public resolvers before benchmarking, so an offline machine gets a clear message instead of a ranking built from failed queries
 - **Asks before applying** - won't change DNS without your confirmation
 - **Automatic backup** - saves your previous DNS settings to a timestamped file before changing
-- **Easy restore** - run with `-Restore` to go back to DHCP defaults
+- **Easy restore** - run with `-Restore` to put back the DNS you had before, static config included
+- **Picks the right adapter** - targets the NIC carrying the default route, so a second connected adapter can't absorb the change
 - **Admin required** - script won't run without elevated privileges
 
 ## Example Output
