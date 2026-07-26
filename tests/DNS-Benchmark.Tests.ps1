@@ -273,6 +273,13 @@ Describe "Get-DnsServerResults" {
 # Get-ActiveNetworkAdapter (mocked Get-NetAdapter)
 # ---------------------------------------------------------------------------
 Describe "Get-ActiveNetworkAdapter" {
+    BeforeEach {
+        # No default route in these cases, which exercises the fallback and keeps
+        # the expectations the same as before route awareness went in. Route
+        # ranking has its own coverage under Select-PreferredAdapter.
+        Mock Get-NetRoute { @() }
+    }
+
     Context "When adapters are available" {
         It "Should return the first UP, non-virtual adapter" {
             Mock Get-NetAdapter {
@@ -329,6 +336,113 @@ Describe "Get-ActiveNetworkAdapter" {
             $result = Get-ActiveNetworkAdapter
             $result | Should -BeNullOrEmpty
         }
+    }
+
+    Context "When the default route is readable" {
+        It "Should pick the adapter that owns the default route" {
+            Mock Get-NetAdapter {
+                @(
+                    [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+                    [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+                )
+            }
+            Mock Get-NetRoute {
+                @([PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+            }
+            (Get-ActiveNetworkAdapter).Name | Should -Be "Ethernet"
+        }
+
+        It "Should fall back to the first adapter when the route table cannot be read" {
+            Mock Get-NetAdapter {
+                @(
+                    [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+                    [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+                )
+            }
+            Mock Get-NetRoute { throw "the route table is unavailable" }
+            (Get-ActiveNetworkAdapter).Name | Should -Be "Wi-Fi"
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Select-PreferredAdapter
+# ---------------------------------------------------------------------------
+# Get-NetAdapter has no documented ordering, so "-First 1" on a box with
+# Ethernet and Wi-Fi both up was a coin flip. Benchmarking one NIC and writing
+# DNS to the other looks like nothing happened.
+Describe "Select-PreferredAdapter" {
+    BeforeAll {
+        $wifi = [PSCustomObject]@{ Name = "Wi-Fi"; Status = "Up"; InterfaceDescription = "Intel Wireless"; InterfaceIndex = 12 }
+        $eth  = [PSCustomObject]@{ Name = "Ethernet"; Status = "Up"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 5 }
+        $down = [PSCustomObject]@{ Name = "Ethernet 2"; Status = "Disconnected"; InterfaceDescription = "Realtek Ethernet"; InterfaceIndex = 9 }
+        $virt = [PSCustomObject]@{ Name = "vEthernet"; Status = "Up"; InterfaceDescription = "Hyper-V Virtual Ethernet"; InterfaceIndex = 20 }
+    }
+
+    It "Should return `$null when there are no adapters at all" {
+        Select-PreferredAdapter -Adapters @() -DefaultRoutes @() | Should -BeNullOrEmpty
+    }
+
+    It "Should return `$null when every adapter is filtered out" {
+        Select-PreferredAdapter -Adapters @($down, $virt) -DefaultRoutes @() | Should -BeNullOrEmpty
+    }
+
+    It "Should return the only candidate without consulting routes" {
+        (Select-PreferredAdapter -Adapters @($down, $wifi) -DefaultRoutes @()).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should prefer the adapter holding the default route over list order" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should pick the cheapest total metric when both have a default route" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0; InterfaceMetric = 45 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0; InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should add RouteMetric to InterfaceMetric when ranking" {
+        # Wi-Fi wins on interface metric alone; the route metric flips it.
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 300; InterfaceMetric = 20 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0;   InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should keep the cheapest route when one interface has several" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 500; InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0;   InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0;   InterfaceMetric = 100 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
+    }
+
+    It "Should give a tie to the earlier adapter" {
+        $routes = @(
+            [PSCustomObject]@{ InterfaceIndex = 12; RouteMetric = 0; InterfaceMetric = 25 }
+            [PSCustomObject]@{ InterfaceIndex = 5;  RouteMetric = 0; InterfaceMetric = 25 }
+        )
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should fall back to the first candidate when no route matches a candidate" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 99; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should never return a filtered-out adapter even when it owns the route" {
+        $routes = @([PSCustomObject]@{ InterfaceIndex = 20; RouteMetric = 0; InterfaceMetric = 5 })
+        (Select-PreferredAdapter -Adapters @($virt, $wifi) -DefaultRoutes $routes).Name | Should -Be "Wi-Fi"
+    }
+
+    It "Should survive a null entry in the route table" {
+        $routes = @($null, [PSCustomObject]@{ InterfaceIndex = 5; RouteMetric = 0; InterfaceMetric = 25 })
+        (Select-PreferredAdapter -Adapters @($wifi, $eth) -DefaultRoutes $routes).Name | Should -Be "Ethernet"
     }
 }
 

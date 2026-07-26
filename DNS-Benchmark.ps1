@@ -90,14 +90,84 @@ function Write-Info    { param($Text) Write-Host "  [i] $Text" -ForegroundColor 
 
 # -- Testable Functions ---------------------------------------------------------
 
+function Select-PreferredAdapter {
+    <#
+    .SYNOPSIS
+        Picks the best candidate out of a set of adapters and a default-route
+        table. Pure, so the choice can be tested without a network.
+    .DESCRIPTION
+        Filtering to Up and non-virtual then taking the first result leaves the
+        answer up to whatever order Get-NetAdapter happened to return, and that
+        order is not documented anywhere. On a laptop with Ethernet and Wi-Fi
+        both up it is a coin flip, and benchmarking one NIC then writing DNS to
+        the other is a silent no-op from the user's side.
+
+        The adapter carrying the default route is the one traffic actually
+        leaves by, so that wins, cheapest total metric first. Ties go to the
+        earlier adapter, and anything unresolvable falls back to the old
+        first-match behaviour rather than failing.
+    .PARAMETER DefaultRoutes
+        Rows from Get-NetRoute for 0.0.0.0/0. Only InterfaceIndex, RouteMetric
+        and InterfaceMetric are read.
+    #>
+    param(
+        [AllowEmptyCollection()]
+        [array]$Adapters = @(),
+        [AllowEmptyCollection()]
+        [array]$DefaultRoutes = @()
+    )
+
+    $candidates = @($Adapters | Where-Object {
+        $_ -and $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth"
+    })
+
+    if ($candidates.Count -eq 0) { return $null }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+
+    # Cheapest default route per interface index.
+    $metrics = @{}
+    foreach ($route in @($DefaultRoutes)) {
+        if (-not $route) { continue }
+        $idx = $route.InterfaceIndex
+        if ($null -eq $idx) { continue }
+        $cost = [int]$route.RouteMetric + [int]$route.InterfaceMetric
+        if (-not $metrics.ContainsKey($idx) -or $cost -lt $metrics[$idx]) { $metrics[$idx] = $cost }
+    }
+
+    $best = $null
+    $bestCost = [int]::MaxValue
+    foreach ($candidate in $candidates) {
+        $idx = $candidate.InterfaceIndex
+        if ($null -eq $idx -or -not $metrics.ContainsKey($idx)) { continue }
+        # Strictly less than, so an earlier adapter keeps a tie.
+        if ($metrics[$idx] -lt $bestCost) {
+            $bestCost = $metrics[$idx]
+            $best = $candidate
+        }
+    }
+
+    if ($best) { return $best }
+    $candidates[0]
+}
+
 function Get-ActiveNetworkAdapter {
     <#
     .SYNOPSIS
-        Returns the first active, non-virtual, non-Bluetooth network adapter.
+        Returns the active, non-virtual, non-Bluetooth adapter that carries the
+        default route, falling back to the first match when no route is readable.
     #>
-    Get-NetAdapter | Where-Object {
-        $_.Status -eq "Up" -and $_.InterfaceDescription -notmatch "Virtual|Loopback|Bluetooth"
-    } | Select-Object -First 1
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+
+    $routes = @()
+    try {
+        $routes = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop)
+    }
+    catch {
+        # No route table to read, so fall back to the first usable adapter.
+        Write-Verbose "Could not read the default route table: $_"
+    }
+
+    Select-PreferredAdapter -Adapters $adapters -DefaultRoutes $routes
 }
 
 function Get-DnsServerResults {
