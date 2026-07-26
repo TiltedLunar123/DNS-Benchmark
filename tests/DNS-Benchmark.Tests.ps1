@@ -557,6 +557,87 @@ Describe "Set-OptimalDns (IPv6)" {
 }
 
 # ---------------------------------------------------------------------------
+# Test-DnsAlreadyOptimal
+# ---------------------------------------------------------------------------
+# The apply path used to short-circuit on "$currentDns[0] -eq winner.Primary".
+# That let two cases through: a machine on the winning IPv4 pair whose IPv6 DNS
+# still came from the router (so -IncludeIPv6 could never do its one job), and a
+# machine whose primary matched but whose secondary did not.
+Describe "Test-DnsAlreadyOptimal" {
+    Context "IPv4 only" {
+        It "Should return `$true when both addresses match" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $true
+        }
+
+        It "Should return `$false when only the primary matches" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "8.8.4.4") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when the pair is in the wrong order" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.0.0.1", "1.1.1.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when a third server is also configured" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1", "8.8.8.8") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false when only one server is configured" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should return `$false on a DHCP adapter with no static servers" {
+            Test-DnsAlreadyOptimal -CurrentDns @() `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $false
+        }
+
+        It "Should ignore the IPv6 list when -IncludeV6 is not set" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("fd00::1", "fd00::2") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" | Should -Be $true
+        }
+    }
+
+    Context "With -IncludeV6" {
+        It "Should return `$false when IPv4 matches but IPv6 came from the router" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("fd00::1", "fd00::2") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
+
+        It "Should return `$false when IPv4 matches and no IPv6 is set at all" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @() `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
+
+        It "Should return `$true only when both families match" {
+            Test-DnsAlreadyOptimal -CurrentDns @("1.1.1.1", "1.0.0.1") `
+                -CurrentDnsV6 @("2606:4700:4700::1111", "2606:4700:4700::1001") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $true
+        }
+
+        It "Should return `$false when IPv6 matches but IPv4 does not" {
+            Test-DnsAlreadyOptimal -CurrentDns @("8.8.8.8", "8.8.4.4") `
+                -CurrentDnsV6 @("2606:4700:4700::1111", "2606:4700:4700::1001") `
+                -PrimaryDns "1.1.1.1" -SecondaryDns "1.0.0.1" `
+                -PrimaryDnsV6 "2606:4700:4700::1111" -SecondaryDnsV6 "2606:4700:4700::1001" `
+                -IncludeV6 | Should -Be $false
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Test-IPv6Available (#8)
 # ---------------------------------------------------------------------------
 Describe "Test-IPv6Available" {

@@ -349,6 +349,49 @@ function Set-OptimalDns {
     $ipv4Ok -and $ipv6Ok
 }
 
+function Test-DnsAlreadyOptimal {
+    <#
+    .SYNOPSIS
+        Returns $true when the adapter is already pointed at exactly the DNS the
+        benchmark wants to apply, so the run can stop without touching anything.
+    .DESCRIPTION
+        The old inline check compared $currentDns[0] against the winner's primary
+        and nothing else. That predates IPv6 support, so a machine already on the
+        winning IPv4 pair with the router's IPv6 DNS still bound counted as
+        optimal and -IncludeIPv6 could never apply. That is the exact leak the
+        switch exists to close. A mismatched secondary slipped through the same
+        way.
+
+        Both addresses of a family have to match, and the list has to be exactly
+        that pair: an adapter carrying a third server is not what an apply would
+        leave behind, so it is not already optimal. IPv6 is only weighed when
+        -IncludeV6 is set, since without it the IPv6 config is never touched.
+    #>
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDns = @(),
+        [AllowEmptyCollection()]
+        [string[]]$CurrentDnsV6 = @(),
+        [Parameter(Mandatory)]
+        [string]$PrimaryDns,
+        [Parameter(Mandatory)]
+        [string]$SecondaryDns,
+        [string]$PrimaryDnsV6 = "",
+        [string]$SecondaryDnsV6 = "",
+        [switch]$IncludeV6
+    )
+
+    $current = @($CurrentDns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $v4Ok = ($current.Count -eq 2) -and ($current[0] -eq $PrimaryDns) -and ($current[1] -eq $SecondaryDns)
+
+    if (-not $IncludeV6) { return $v4Ok }
+
+    $current6 = @($CurrentDnsV6 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $v6Ok = ($current6.Count -eq 2) -and ($current6[0] -eq $PrimaryDnsV6) -and ($current6[1] -eq $SecondaryDnsV6)
+
+    $v4Ok -and $v6Ok
+}
+
 function Test-NetworkConnectivity {
     <#
     .SYNOPSIS
@@ -700,8 +743,30 @@ if (-not $SkipApply) {
         }
     }
 
+    # Read the current IPv6 servers before deciding whether anything needs to
+    # change. With -IncludeIPv6 an adapter can already hold the winning IPv4 pair
+    # while still resolving over whatever IPv6 DNS the router handed out, and
+    # that is precisely the case the switch is for.
+    $currentDnsV6 = @()
+    if ($applyV6) {
+        try {
+            $currentDnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses)
+        } catch {
+            $currentDnsV6 = @()
+        }
+    }
+
     # Check if already using the winner
-    if ($currentDns -and $currentDns[0] -eq $winner.Primary) {
+    $optimalCheck = @{
+        CurrentDns     = @($currentDns)
+        CurrentDnsV6   = $currentDnsV6
+        PrimaryDns     = $winner.Primary
+        SecondaryDns   = $winner.Secondary
+        PrimaryDnsV6   = $winnerV6Primary
+        SecondaryDnsV6 = $winnerV6Secondary
+        IncludeV6      = $applyV6
+    }
+    if (Test-DnsAlreadyOptimal @optimalCheck) {
         Write-Success "You're already using the best DNS ($($winner.Name)). No changes needed!"
         exit 0
     }
@@ -718,15 +783,6 @@ if (-not $SkipApply) {
     $confirm = Read-Host "  Apply these settings? (Y/n)"
     if ($confirm -match "^[Yy]?$") {
         try {
-            $currentDnsV6 = @()
-            if ($applyV6) {
-                try {
-                    $currentDnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv6 -ErrorAction Stop).ServerAddresses)
-                } catch {
-                    $currentDnsV6 = @()
-                }
-            }
-
             $backupPath = Backup-DnsSettings -BackupDir $ScriptDir -AdapterName $adapter.Name -InterfaceIndex $adapter.InterfaceIndex -CurrentDns $currentDns -CurrentDnsV6 $currentDnsV6
             Write-Info "Backup saved: $backupPath"
 
