@@ -133,11 +133,11 @@ Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Pre-set directory variables so the script can find a valid path for backups/reports.
-# When run via ScriptBlock, $PSScriptRoot is empty — this fixes that.
+# When run via ScriptBlock, $PSScriptRoot is empty, this fixes that.
 $ScriptDir = $installDir
 
 # Run directly from the in-memory string as a ScriptBlock.
-# This bypasses execution policy entirely — no .ps1 file is "loaded".
+# This bypasses execution policy entirely, no .ps1 file is "loaded".
 $scriptBlock = [ScriptBlock]::Create($scriptContent)
 & $scriptBlock
 

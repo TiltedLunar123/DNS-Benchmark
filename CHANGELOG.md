@@ -24,11 +24,11 @@ All notable changes to DNS Benchmark & Optimizer are documented here.
 - Pester coverage for `Set-OptimalDns` (success plus two failure paths, plus the IPv6 apply path), `Test-IPv6Available`, the IPv6 backup field, a parsed-from-source check that every IPv6 resolver entry is a real paired IPv6 literal, the backup file extension, the retention behavior, `Test-StaticDnsConfigured`, and the connectivity probe (online, offline, and partial-reachability cases).
 - Optional parallel benchmarking. A new `-Parallel` switch tests the resolvers concurrently with `ForEach-Object -Parallel` instead of one at a time, so a full pass finishes much faster (#12). It stays off by default and only engages on PowerShell 7+; on Windows PowerShell 5.1 it notes that and runs sequentially. `-ThrottleLimit` (default 8) caps how many resolvers run at once. The parallel path reuses the same `Get-DnsServerResults` as the sequential one, rebuilt inside each thread since parent-scope functions are not visible in a `-Parallel` block. Because the servers share the link while being measured, latency can read slightly higher than a sequential run; the output says so and the default mode stays the precise one. Covered by tests for the version gate and the fan-out (driven offline with a stub resolver).
 
-## [1.1.0] — 2026-04-11
+## [1.1.0] - 2026-04-11
 
 ### Added
 - Pester test suite with 30+ tests covering scoring, grading, benchmarking, adapter detection, and backup logic
-- GitHub Actions CI pipeline — PSScriptAnalyzer lint + Pester tests on Windows
+- GitHub Actions CI pipeline. PSScriptAnalyzer lint + Pester tests on Windows
 - PSScriptAnalyzer configuration with project-specific rule exclusions
 - CONTRIBUTING.md with dev setup, testing instructions, and PR guidelines
 - SECURITY.md documenting permissions, data handling, and vulnerability reporting
@@ -39,7 +39,7 @@ All notable changes to DNS Benchmark & Optimizer are documented here.
 - Added `[ValidateRange(1, 100)]` to `-TestCount` parameter
 - Expanded .gitignore with OS, IDE, and test artifact patterns
 
-## [1.0.0] — 2026-04-08
+## [1.0.0] - 2026-04-08
 
 ### Added
 - Benchmark 17 public DNS resolvers for speed, reliability, and security

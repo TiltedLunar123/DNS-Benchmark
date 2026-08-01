@@ -27,7 +27,7 @@ This script requires **Administrator privileges** because changing DNS settings 
 - **No telemetry.** No usage data, analytics, or crash reports are collected or sent anywhere.
 - **No network requests** beyond DNS queries to the listed public resolvers. No HTTP calls, no API endpoints.
 - **No persistent changes** beyond DNS configuration. No registry edits, no startup entries, no background services.
-- **No data exfiltration.** DNS queries use standard domains (google.com, github.com, etc.) — the script never sends your data to any server.
+- **No data exfiltration.** DNS queries use standard domains (google.com, github.com, etc.), the script never sends your data to any server.
 - **No credential handling.** The script does not ask for, store, or transmit any passwords, tokens, or credentials.
 
 ## Backup Behavior

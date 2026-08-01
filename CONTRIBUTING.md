@@ -1,81 +1,59 @@
-# Contributing to DNS Benchmark & Optimizer
+# Contributing
 
-Thanks for your interest in contributing! Here's how to get started.
-
-## Getting Started
-
-1. Fork the repository
-2. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/DNS-Benchmark.git
-   cd DNS-Benchmark
-   ```
-3. Run the benchmark (requires Administrator):
-   ```powershell
-   # Right-click PowerShell > "Run as Administrator"
-   .\DNS-Benchmark.ps1 -SkipApply
-   ```
-
-## Development Notes
-
-- **Single-script architecture** — All logic lives in `DNS-Benchmark.ps1`. Functions are extracted for testability but the script is self-contained.
-- **No build step** — Edit the `.ps1` file and run it directly.
-- **Admin required** — The script changes DNS settings via `Set-DnsClientServerAddress`, which requires elevation. Use `-SkipApply` for safe benchmarking during development.
-- **PowerShell 5.1+** — Must work on the version pre-installed with Windows 10/11. Avoid PS 7-only syntax.
-- **Refresh the checksum after editing the benchmark** — `install.ps1` verifies `DNS-Benchmark.ps1` against the hash in `checksums.txt`. If you change the benchmark script, regenerate it or the installer (and the test suite) will reject the mismatch:
-  ```powershell
-  $c = [System.IO.File]::ReadAllText("DNS-Benchmark.ps1") -replace "`r`n","`n" -replace "`r","`n"
-  $h = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($c))).Replace("-","").ToLower()
-  Set-Content checksums.txt "$h  DNS-Benchmark.ps1" -NoNewline -Encoding utf8
-  ```
-
-## Testing
-
-Run tests before submitting a PR:
+Fork it, clone your fork, and run the benchmark with `-SkipApply` so you are not
+rewriting your own DNS settings every time you test a change:
 
 ```powershell
-# Install test dependencies (first time only)
+.\DNS-Benchmark.ps1 -SkipApply
+```
+
+You need an elevated PowerShell for the parts that actually apply settings, but
+`-SkipApply` covers most development.
+
+## Things worth knowing before you edit
+
+Everything lives in `DNS-Benchmark.ps1`. There is no build step and no module layout;
+functions are broken out so the tests can get at them, but the script is meant to stay
+one file you can read top to bottom.
+
+It has to run on PowerShell 5.1, which is what ships with Windows 10 and 11. PS7-only
+syntax will pass on your machine and fail for most people who run this.
+
+If you change `DNS-Benchmark.ps1`, regenerate the checksum or both `install.ps1` and the
+test suite will reject the file:
+
+```powershell
+$c = [System.IO.File]::ReadAllText("DNS-Benchmark.ps1") -replace "`r`n","`n" -replace "`r","`n"
+$h = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($c))).Replace("-","").ToLower()
+Set-Content checksums.txt "$h  DNS-Benchmark.ps1" -NoNewline -Encoding utf8
+```
+
+That trips people up, including me, more than anything else in the repo.
+
+## Tests
+
+```powershell
 Install-Module -Name Pester -MinimumVersion 5.0 -Force -Scope CurrentUser
 Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
 
-# Run linter
 Invoke-ScriptAnalyzer -Path ./DNS-Benchmark.ps1 -Settings ./PSScriptAnalyzerSettings.psd1 -Severity Warning,Error
-
-# Run tests
 Invoke-Pester ./tests -Output Detailed
 ```
 
-When adding new functionality, add corresponding tests in the `tests/` directory. Tests use Pester 5 with AST-based function extraction so functions can be tested without running the full benchmark.
+The linter should come back clean. Tests use Pester 5 and pull functions out via the AST,
+so they can exercise the scoring and statistics without running a real benchmark. New
+behaviour wants a test alongside it.
 
-## What to Work On
+## Pull requests
 
-Some areas where help is appreciated:
+One thing per PR, please. Run the linter and the tests, update the README if you changed
+something a user would notice, and match the style already in the file rather than
+introducing a new one.
 
-- **New DNS providers** — Adding emerging privacy-focused DNS resolvers
-- **IPv6 support** — Testing and applying IPv6 DNS addresses
-- **Cross-platform** — PowerShell 7 support for Linux/macOS DNS configuration
-- **Concurrent testing** — Parallel DNS queries for faster benchmarking
-- **Test coverage** — More edge-case tests for scoring and statistical functions
+## Bugs
 
-## Pull Request Guidelines
-
-1. **Keep PRs focused** — One feature or fix per PR.
-2. **Test manually** — Run the benchmark with `-SkipApply` and verify output looks correct.
-3. **Follow existing style** — Match the code style you see in the project.
-4. **Update the README** if your change adds or modifies user-facing behavior.
-5. **Run the linter** — `Invoke-ScriptAnalyzer` should report zero issues.
-
-## Reporting Bugs
-
-Open an issue with:
-
-- What you expected to happen
-- What actually happened
-- Steps to reproduce
-- PowerShell version (`$PSVersionTable.PSVersion`)
-- Windows version
-- Network adapter type (Wi-Fi, Ethernet, etc.)
-
-## Code of Conduct
-
-Be respectful, constructive, and inclusive. We're all here to make a useful tool better.
+Open an issue and include what you expected, what happened instead, and how to
+reproduce it. For anything involving results being wrong or the apply step misbehaving,
+also include your PowerShell version (`$PSVersionTable.PSVersion`), your Windows
+version, and whether you are on Wi-Fi or Ethernet. DNS behaviour varies more by adapter
+and network than you would think, and without that I usually cannot reproduce it.
