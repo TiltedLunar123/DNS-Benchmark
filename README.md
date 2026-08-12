@@ -184,25 +184,23 @@ Results are displayed with letter grades (A+ through F) and the top 3 are starre
 - **Automatic backup** - saves your previous DNS settings to a timestamped file before changing
 - **Easy restore** - run with `-Restore` to put back the DNS you had before, static config included
 - **Picks the right adapter** - targets the NIC carrying the default route, so a second connected adapter can't absorb the change
-- **Admin required** - script won't run without elevated privileges
+- **Admin needed** - script won't run without elevated privileges
 
-## Example Output
+## Example output
 
-```
-  DNS Server                     Avg (ms)   Med (ms)     Jitter     Rely %     Security    Score    Grade
-  --------------------------------------------------------------------------------------------------------
-  * Quad9                            12.45       11.2       3.21     100.0%      96/100     89.2     A+
-  * Cloudflare                        8.33        7.5        2.1     100.0%      92/100     88.5     A+
-  * Cloudflare (Malware)             10.12        9.8       2.55     100.0%      95/100     87.1      A
-    Mullvad                           18.9       17.6       4.33      99.8%      94/100     82.4     A-
-    ...
-```
+A real run over 17 resolvers, three queries each, with `-SkipApply` so nothing
+was changed:
+
+![Terminal output ranking 17 DNS resolvers by composite score. Cloudflare Malware leads at 7.51 ms average and 98.4 with an A+, followed by Cloudflare Family and plain Cloudflare, then CleanBrowsing, Quad9 and the rest down to Google at 49.1 with a D. Mullvad returns 9999 ms and 0 percent reliability for an F. Below the table it recommends Cloudflare Malware on 1.1.1.2 and 1.0.0.2, and notes that benchmark only mode applied no DNS changes.](docs/results.png)
+
+Mullvad failing outright is what an unreachable resolver looks like: the run
+scores it on what actually happened rather than dropping it from the table.
 
 ## Requirements
 
 - Windows 10/11
 - PowerShell 5.1+ (pre-installed on Windows 10/11); `-Parallel` needs PowerShell 7+
-- **Run as Administrator** (required to change DNS settings)
+- **Run as Administrator** (needed to change DNS settings)
 
 ## License
 
